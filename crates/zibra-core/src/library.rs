@@ -262,25 +262,54 @@ impl LibraryStore {
     }
 
     pub fn set_manga_status(&self, manga_id: &str, status: &str) -> anyhow::Result<()> {
+        self.set_manga_status_with_manga(None, manga_id, status)
+    }
+
+    pub fn set_manga_status_with_manga(
+        &self,
+        manga: Option<&Manga>,
+        manga_id: &str,
+        status: &str,
+    ) -> anyhow::Result<()> {
+        if let Some(m) = manga {
+            let exists = {
+                let conn = self.conn.lock();
+                conn.query_row(
+                    "SELECT 1 FROM history_manga WHERE id = ?1",
+                    params![m.id],
+                    |_| Ok(true),
+                )
+                .optional()
+                .unwrap_or(None)
+                .unwrap_or(false)
+            };
+            if !exists {
+                self.record_history(m);
+            }
+        }
         let conn = self.conn.lock();
-        let _ = conn.execute(
+        conn.execute(
             "UPDATE library_manga SET status = ?1 WHERE id = ?2",
             params![status, manga_id],
-        );
-        let _ = conn.execute(
+        )?;
+        conn.execute(
             "UPDATE history_manga SET status = ?1 WHERE id = ?2",
             params![status, manga_id],
-        );
+        )?;
         Ok(())
     }
 
     pub fn toggle_favorite(&self, manga: &Manga) -> bool {
+        self.toggle_favorite_result(manga).unwrap_or(false)
+    }
+
+    pub fn toggle_favorite_result(&self, manga: &Manga) -> anyhow::Result<bool> {
         if self.is_favorite(&manga.id) {
-            let _ = self.remove_favorite(&manga.id);
-            false
+            self.remove_favorite(&manga.id)?;
+            Ok(false)
         } else {
-            let _ = self.save_favorite(manga);
-            true
+            self.save_favorite(manga)?;
+            Ok(true)
         }
     }
 

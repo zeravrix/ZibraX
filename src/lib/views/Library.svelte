@@ -4,7 +4,7 @@
   import CoverGrid from '../components/CoverGrid.svelte';
   import SearchBar from '../components/SearchBar.svelte';
   import EmptyState from '../components/EmptyState.svelte';
-  import { appState, notify, openReader, navigate, mediaUrl } from '../stores/app.svelte.js';
+  import { appState, notify, openReader, navigate, mediaUrl, plainSnapshot } from '../stores/app.svelte.js';
   import { Heart, History, Trash2, Rss, Download, BookOpen, X } from 'lucide-svelte';
 
   export let mode = 'history'; // 'history' | 'favorites' | 'feed' | 'downloads'
@@ -87,7 +87,7 @@
         try {
           const p = await invoke('get_reading_progress', { mangaId: m.id });
           if (p && p.total_pages > 0) {
-            pMap[m.id] = p.page_index / p.total_pages;
+            pMap[m.id] = Math.min(1, (p.page_index + 1) / p.total_pages);
           }
         } catch (_) {}
       });
@@ -143,7 +143,7 @@
 
   async function handleToggleFavorite(manga) {
     try {
-      const isFav = await invoke('toggle_favorite', { manga });
+      const isFav = await invoke('toggle_favorite', { manga: plainSnapshot(manga) });
       if (isFav) {
         favoritesSet.add(manga.id);
         notify(`Added "${manga.title}" to favourites`);
@@ -172,7 +172,7 @@
 
   async function handleSetStatus(manga, status) {
     try {
-      await invoke('set_manga_status', { mangaId: manga.id, status });
+      await invoke('set_manga_status', { mangaId: manga.id, status, manga: plainSnapshot(manga) });
       manga.status = status;
       mangas = [...mangas];
       notify(`Marked "${manga.title}" as ${status === 'COMPLETED' ? 'Completed' : 'Reading'}`);

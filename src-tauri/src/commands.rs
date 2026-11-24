@@ -62,7 +62,10 @@ pub async fn get_favorites(state: State<'_, AppState>) -> Result<Vec<Manga>, Str
 
 #[tauri::command]
 pub async fn toggle_favorite(state: State<'_, AppState>, manga: Manga) -> Result<bool, String> {
-    Ok(state.library.toggle_favorite(&manga))
+    state
+        .library
+        .toggle_favorite_result(&manga)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -76,8 +79,16 @@ pub async fn remove_history(state: State<'_, AppState>, manga_id: String) -> Res
 }
 
 #[tauri::command]
-pub async fn set_manga_status(state: State<'_, AppState>, manga_id: String, status: String) -> Result<(), String> {
-    state.library.set_manga_status(&manga_id, &status).map_err(|e| e.to_string())
+pub async fn set_manga_status(
+    state: State<'_, AppState>,
+    manga_id: String,
+    status: String,
+    manga: Option<Manga>,
+) -> Result<(), String> {
+    state
+        .library
+        .set_manga_status_with_manga(manga.as_ref(), &manga_id, &status)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -98,6 +109,32 @@ pub async fn save_reading_progress(state: State<'_, AppState>, progress: Reading
 }
 
 #[tauri::command]
+pub async fn mark_chapter_read(
+    state: State<'_, AppState>,
+    manga: Manga,
+    chapter: Chapter,
+    total_pages: Option<usize>,
+) -> Result<(), String> {
+    state.library.record_history(&manga);
+    let total = total_pages.filter(|&n| n > 0);
+    let idx = total.map(|n| n.saturating_sub(1)).unwrap_or(0);
+    let updated_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    state.library.save_progress(&ReadingProgress {
+        manga_id: manga.id,
+        chapter_id: chapter.id,
+        page_index: idx,
+        total_pages: total,
+        scroll_offset_y: 0.0,
+        chapter_number: chapter.number,
+        updated_at,
+    });
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
     Ok(state.settings_store.load())
 }
@@ -107,6 +144,22 @@ pub async fn save_settings(state: State<'_, AppState>, settings: AppSettings) ->
     state.settings_store.save(&settings).map_err(|e| e.to_string())?;
     state.reload_registry(&settings);
     Ok(())
+}
+
+pub fn toggle_source_pin_inner(store: &zibra_core::AppSettingsStore, source_id: &str) -> Result<Vec<String>, String> {
+    let mut settings = store.load();
+    if !settings.pinned_source_ids.remove(source_id) {
+        settings.pinned_source_ids.insert(source_id.to_string());
+    }
+    store.save(&settings).map_err(|e| e.to_string())?;
+    let mut ids: Vec<String> = settings.pinned_source_ids.into_iter().collect();
+    ids.sort();
+    Ok(ids)
+}
+
+#[tauri::command]
+pub async fn toggle_source_pin(state: State<'_, AppState>, source_id: String) -> Result<Vec<String>, String> {
+    toggle_source_pin_inner(&state.settings_store, &source_id)
 }
 
 #[tauri::command]
@@ -924,6 +977,48 @@ mod tests {
     async fn test_open_external_url_scheme_guard() {
         assert!(open_external_url("javascript:alert(1)".to_string()).await.is_err());
         assert!(open_external_url("file:///etc/passwd".to_string()).await.is_err());
+    }
+
+    #[test]
+    fn test_pin_favorite_status_and_read_round_trip() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "zibra_cmd_persist_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let settings_store = zibra_core::AppSettingsStore::new(&temp_dir);
+        let default_ids: Vec<String> = settings_store.load().pinned_source_ids.into_iter().collect();
+        assert!(!default_ids.is_empty());
+        for sid in &default_ids {
+            toggle_source_pin_inner(&settings_store, sid).unwrap();
+        }
+        assert!(settings_store.load().pinned_source_ids.is_empty());
+
+        let library = zibra_core::LibraryStore::new(&temp_dir).unwrap();
+        let manga = zibra_core::Manga::new("m1", "Solo Test", "MANGADEX");
+        let chapter = zibra_core::Chapter::new("c1", "m1", "Ch 1", Some(1.0), "MANGADEX");
+
+        assert!(library.toggle_favorite_result(&manga).unwrap());
+        assert!(library.is_favorite("m1"));
+        assert!(library.set_manga_status_with_manga(Some(&manga), "m1", "COMPLETED").is_ok());
+        assert_eq!(library.list_history().first().unwrap().status.as_deref(), Some("COMPLETED"));
+        library.record_history(&manga);
+        library.save_progress(&zibra_core::ReadingProgress {
+            manga_id: "m1".to_string(),
+            chapter_id: chapter.id.clone(),
+            page_index: 5,
+            total_pages: Some(12),
+            scroll_offset_y: 0.0,
+            chapter_number: Some(1.0),
+            updated_at: 1000,
+        });
+        assert!(library.read_chapter_ids("m1").contains("c1"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
 

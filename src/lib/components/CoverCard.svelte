@@ -166,7 +166,7 @@
   }
 
   .card:hover {
-    transform: translateY(-5px);
+    transform: translateY(-4px);
   }
 
   .cover-wrapper {
@@ -176,18 +176,16 @@
     overflow: hidden;
     position: relative;
     background: var(--z-surface-raised);
-    box-shadow: 0 8px 24px -4px rgba(0, 0, 0, 0.65), 0 2px 6px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.12);
-    transition: transform var(--z-duration-normal) var(--z-ease-spring),
-                box-shadow var(--z-duration-normal) var(--z-ease-out),
+    box-shadow: var(--z-shadow-card);
+    transition: box-shadow var(--z-duration-normal) var(--z-ease-out),
                 border-color var(--z-duration-normal) var(--z-ease-out);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--z-border);
     isolation: isolate;
   }
 
   .card:hover .cover-wrapper {
-    box-shadow: 0 18px 40px -6px rgba(0, 0, 0, 0.8), 0 0 24px var(--z-accent-glow);
-    border-color: rgba(255, 255, 255, 0.22);
-    transform: translateY(-4px);
+    box-shadow: var(--z-shadow-card-hover);
+    border-color: var(--z-accent);
   }
 
   img {
@@ -196,9 +194,14 @@
     object-fit: cover;
     display: block;
     opacity: 0;
-    transition: opacity var(--z-duration-normal) var(--z-ease-out);
+    transition: opacity var(--z-duration-normal) var(--z-ease-out),
+                transform var(--z-duration-slow) var(--z-ease-out);
     image-rendering: -webkit-optimize-contrast;
     image-rendering: high-quality;
+  }
+
+  .card:hover img.loaded {
+    transform: scale(1.03);
   }
 
   img.loaded {
@@ -236,12 +239,13 @@
     color: #ef4444;
   }
 
-  .card:hover .fav-btn {
+  .card:hover .fav-btn,
+  .card:focus-within .fav-btn {
     opacity: 1;
   }
 
   .fav-btn:hover {
-    transform: scale(1.15);
+    transform: scale(1.12);
     background: rgba(0, 0, 0, 0.85);
   }
 
@@ -279,7 +283,7 @@
 
   .circle-fill {
     fill: none;
-    stroke: #3b82f6;
+    stroke: var(--z-accent);
     stroke-width: 3.4;
     stroke-linecap: round;
     transition: stroke-dasharray 0.3s ease;

@@ -1,5 +1,6 @@
 use zibra_core::{
-    AppSettings, Chapter, ChapterArchive, ColorTheme, DesktopDownloader, LibraryStore, Manga, ReadingProgress,
+    detect_image_ext, is_html_or_challenge, AnimationLevel, AppSettings, AppSettingsStore,
+    Chapter, ChapterArchive, ColorTheme, DesktopDownloader, LibraryStore, Manga, ReadingProgress,
 };
 use std::io::Write;
 
@@ -114,5 +115,62 @@ fn test_downloader_rejects_path_traversal_on_delete_and_orange_alias() {
 
     let _ = Chapter::new("c1", "m1", "Ch 1", Some(1.0), "MANGADEX");
     let _ = ChapterArchive::is_image_name("0001.webp");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_empty_pinned_sources_persist_and_animation_full_alias() {
+    let dir = std::env::temp_dir().join(format!(
+        "zibra_core_settings_test_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let store = AppSettingsStore::new(&dir);
+    let mut s = AppSettings::default();
+    assert!(!s.pinned_source_ids.is_empty());
+    s.pinned_source_ids.clear();
+    store.save(&s).unwrap();
+
+    let reloaded = store.load();
+    assert!(
+        reloaded.pinned_source_ids.is_empty(),
+        "empty pinned_source_ids must persist instead of resetting to defaults"
+    );
+
+    let anim: AnimationLevel = serde_json::from_str("\"Full\"").unwrap();
+    assert_eq!(anim, AnimationLevel::Smooth);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_image_magic_detection_and_favorite_result() {
+    assert_eq!(detect_image_ext(&[0x00, 0x00, 0x01, 0x00, 1, 0]), "ico");
+    assert_eq!(detect_image_ext(b"BM\x00\x00"), "bmp");
+    assert_eq!(detect_image_ext(b"\x00\x00\x00\x1cftypavif"), "avif");
+
+    let mut jpeg_with_cf_exif = vec![0xFF, 0xD8, 0xFF, 0xE1];
+    jpeg_with_cf_exif.extend_from_slice(b"cloudflare-xmp-tag");
+    assert!(!is_html_or_challenge(&jpeg_with_cf_exif));
+    assert!(is_html_or_challenge(b"<!DOCTYPE html><html>Checking your browser"));
+
+    let dir = std::env::temp_dir().join(format!(
+        "zibra_core_fav_test_{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let lib = LibraryStore::new(&dir).unwrap();
+    let manga = Manga::new("m-fav-1", "Test Manhwa", "MANGADEX");
+    assert!(lib.toggle_favorite_result(&manga).unwrap());
+    assert!(lib.is_favorite("m-fav-1"));
+    lib.set_manga_status_with_manga(Some(&manga), "m-fav-1", "COMPLETED")
+        .unwrap();
+    assert_eq!(lib.list_favorites()[0].status.as_deref(), Some("COMPLETED"));
+    assert!(!lib.toggle_favorite_result(&manga).unwrap());
+    assert!(!lib.is_favorite("m-fav-1"));
     let _ = std::fs::remove_dir_all(&dir);
 }

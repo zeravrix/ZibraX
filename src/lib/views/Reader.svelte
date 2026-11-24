@@ -2,7 +2,7 @@
   import { onMount, onDestroy, tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
-  import { appState, goBack, notify, updateSettings, toChronologicalChapters, mediaUrl } from '../stores/app.svelte.js';
+  import { appState, goBack, notify, updateSettings, toChronologicalChapters, mediaUrl, plainSnapshot } from '../stores/app.svelte.js';
   import {
     clampZoom,
     needsNextChapterFetch,
@@ -428,7 +428,7 @@
       } else if (isFullscreen) {
         toggleFullscreen();
       } else {
-        goBack();
+        exitReader();
       }
       return;
     }
@@ -600,14 +600,14 @@
 
   function saveCurrentProgress() {
     const entry = flatPages[currentGlobalIdx];
-    if (!manga || !entry) return;
+    if (!manga || !entry) return Promise.resolve();
     const ch = entry.chapter;
     const saveKey = `${ch.id}:${entry.pageIdx}`;
-    if (saveKey === lastSavedKey) return;
+    if (saveKey === lastSavedKey) return Promise.resolve();
     lastSavedKey = saveKey;
     appState.activeChapter = ch;
 
-    invoke('save_reading_progress', {
+    return invoke('save_reading_progress', {
       progress: {
         manga_id: manga.id,
         chapter_id: ch.id,
@@ -618,6 +618,12 @@
         updated_at: Date.now(),
       },
     }).catch(() => {});
+  }
+
+  async function exitReader() {
+    lastSavedKey = '';
+    await saveCurrentProgress();
+    goBack();
   }
 
   function toggleHud() {
@@ -702,6 +708,9 @@
       pageGap = appState.settings.seam_trim_px;
     }
 
+    if (manga) {
+      invoke('record_history', { manga: plainSnapshot(manga) }).catch(() => {});
+    }
     loadInitialChapter();
     try {
       unlistenCf = await listen('cloudflare-solved', (event) => {
@@ -740,7 +749,7 @@
   <!-- TOP HUD BAR -->
   <header class="hud-top" class:visible={showHud} role="toolbar" tabindex="-1" on:click|stopPropagation on:keydown|stopPropagation>
     <div class="hud-left">
-      <button class="hud-btn" on:click={goBack} title="Back">
+      <button class="hud-btn" on:click={exitReader} title="Back">
         <ArrowLeft size={18} strokeWidth={2} />
       </button>
       <div class="hud-titles">
@@ -842,7 +851,7 @@
             <RotateCcw size={15} />
             Retry
           </button>
-          <button class="cf-back-btn" on:click={goBack}>
+          <button class="cf-back-btn" on:click={exitReader}>
             <ArrowLeft size={15} />
             Back
           </button>

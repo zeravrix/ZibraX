@@ -474,7 +474,20 @@ impl DesktopDownloader {
     }
 }
 
+pub fn has_image_magic(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0xFF, 0xD8, 0xFF])
+        || bytes.starts_with(&[0x89, b'P', b'N', b'G'])
+        || (bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP")
+        || bytes.starts_with(b"GIF8")
+        || bytes.starts_with(b"BM")
+        || bytes.starts_with(&[0x00, 0x00, 0x01, 0x00])
+        || (bytes.len() >= 12 && &bytes[4..8] == b"ftyp")
+}
+
 pub fn is_html_or_challenge(bytes: &[u8]) -> bool {
+    if has_image_magic(bytes) {
+        return false;
+    }
     let head_len = bytes.len().min(512);
     let head = String::from_utf8_lossy(&bytes[..head_len]).trim_start().to_ascii_lowercase();
     head.starts_with("<!doctype html") || head.starts_with("<html") || head.contains("cloudflare")
@@ -489,6 +502,12 @@ pub fn detect_image_ext(bytes: &[u8]) -> &'static str {
         "webp"
     } else if bytes.starts_with(b"GIF8") {
         "gif"
+    } else if bytes.starts_with(b"BM") {
+        "bmp"
+    } else if bytes.starts_with(&[0x00, 0x00, 0x01, 0x00]) {
+        "ico"
+    } else if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+        "avif"
     } else {
         "jpg"
     }

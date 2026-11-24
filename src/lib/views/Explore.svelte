@@ -5,7 +5,7 @@
   import CoverGrid from '../components/CoverGrid.svelte';
   import EmptyState from '../components/EmptyState.svelte';
   import ContextMenu from '../components/ContextMenu.svelte';
-  import { appState, notify, updateSettings, mediaUrl } from '../stores/app.svelte.js';
+  import { appState, notify, loadSettings, toggleSourcePin, plainSnapshot, mediaUrl } from '../stores/app.svelte.js';
   import { 
     Compass, Globe, Flame, Clock, ShieldAlert, 
     Search, ArrowLeft, Star, ExternalLink, RefreshCw,
@@ -45,38 +45,27 @@
   let isGlobalSearching = false;
   let globalSearchDone = false;
 
+  let failedIcons = new Set();
   const languages = ['ALL', 'en', 'ar', 'es', 'fr', 'id', 'ru', 'ja', 'ko', 'pt', 'tr', 'vi', 'de', 'it'];
 
-  const DEFAULT_PINNED_IDS = ['MANGADEX', 'HIJALA', 'ASURASCANS', 'FLAMESCANS', 'MANGASWAT', 'TOONILY'];
+  $: pinnedSourceIds = Array.isArray(appState.settings?.pinned_source_ids)
+    ? appState.settings.pinned_source_ids
+    : [];
 
-  function loadPinnedIds() {
-    const saved = appState.settings?.pinned_source_ids;
-    if (Array.isArray(saved) && saved.length > 0) {
-      pinnedSourceIds = [...saved];
-    } else {
-      pinnedSourceIds = [...DEFAULT_PINNED_IDS];
+  function markIconFailed(sourceId) {
+    if (!failedIcons.has(sourceId)) {
+      failedIcons.add(sourceId);
+      failedIcons = new Set(failedIcons);
     }
   }
 
-  function savePinnedIds() {
-    if (appState.settings) {
-      updateSettings({
-        ...appState.settings,
-        pinned_source_ids: [...pinnedSourceIds],
-      });
-    }
-  }
-
-  function togglePin(sourceId, e) {
+  async function togglePin(sourceId, e) {
     if (e) e.stopPropagation();
-    if (pinnedSourceIds.includes(sourceId)) {
-      pinnedSourceIds = pinnedSourceIds.filter(id => id !== sourceId);
-      notify(`Unpinned source`);
-    } else {
-      pinnedSourceIds = [...pinnedSourceIds, sourceId];
-      notify(`Pinned source to Explore`);
+    const wasPinned = pinnedSourceIds.includes(sourceId);
+    const updated = await toggleSourcePin(sourceId);
+    if (updated !== null) {
+      notify(wasPinned ? 'Unpinned source' : 'Pinned source to Explore');
     }
-    savePinnedIds();
   }
 
   async function handlePinnedSearchKeydown(e) {
@@ -320,7 +309,7 @@
 
   async function handleToggleFavorite(manga) {
     try {
-      const isFav = await invoke('toggle_favorite', { manga });
+      const isFav = await invoke('toggle_favorite', { manga: plainSnapshot(manga) });
       if (isFav) {
         favoritesSet.add(manga.id);
         notify(`Added "${manga.title}" to favourites`);
@@ -344,7 +333,9 @@
   });
 
   onMount(async () => {
-    loadPinnedIds();
+    if (!appState.settings) {
+      await loadSettings();
+    }
     await loadFavorites();
     await loadSources();
 
@@ -454,13 +445,14 @@
           >
             <div class="card-top">
               <div class="source-icon-wrap">
-                {#if source.icon_url}
-                  <img src={mediaUrl(source.icon_url, null, 'cover')} alt="" class="source-favicon" loading="lazy" decoding="async" on:error={(e) => e.target.style.display = 'none'} />
+                {#if source.icon_url && !failedIcons.has(source.id)}
+                  <img src={mediaUrl(source.icon_url, null, 'cover')} alt="" class="source-favicon" loading="lazy" decoding="async" on:error={() => markIconFailed(source.id)} />
                 {:else}
                   <Globe size={24} class="source-fallback-icon" />
                 {/if}
               </div>
               <button
+                type="button"
                 class="pin-btn active"
                 title="Unpin from Explore"
                 on:click={(e) => togglePin(source.id, e)}
@@ -546,13 +538,14 @@
           >
             <div class="card-top">
               <div class="source-icon-wrap">
-                {#if source.icon_url}
-                  <img src={mediaUrl(source.icon_url, null, 'cover')} alt="" class="source-favicon" loading="lazy" decoding="async" on:error={(e) => e.target.style.display = 'none'} />
+                {#if source.icon_url && !failedIcons.has(source.id)}
+                  <img src={mediaUrl(source.icon_url, null, 'cover')} alt="" class="source-favicon" loading="lazy" decoding="async" on:error={() => markIconFailed(source.id)} />
                 {:else}
                   <Globe size={24} class="source-fallback-icon" />
                 {/if}
               </div>
               <button
+                type="button"
                 class="pin-btn"
                 class:active={pinnedSourceIds.includes(source.id)}
                 title={pinnedSourceIds.includes(source.id) ? "Unpin" : "Pin to Explore"}
@@ -595,8 +588,8 @@
 
         <div class="source-meta-block">
           <div class="source-icon-mini">
-            {#if selectedSource?.icon_url}
-              <img src={mediaUrl(selectedSource.icon_url, null, 'cover')} alt="" class="mini-favicon" on:error={(e) => e.target.style.display = 'none'} />
+            {#if selectedSource?.icon_url && !failedIcons.has(selectedSource.id)}
+              <img src={mediaUrl(selectedSource.icon_url, null, 'cover')} alt="" class="mini-favicon" on:error={() => markIconFailed(selectedSource.id)} />
             {:else}
               <Globe size={18} />
             {/if}
@@ -749,10 +742,10 @@
     align-items: center;
     gap: 8px;
     padding: 7px 14px;
-    background: rgba(59, 130, 246, 0.12);
-    border: 1px solid rgba(59, 130, 246, 0.35);
+    background: var(--z-accent-muted);
+    border: 1px solid var(--z-border-hover);
     border-radius: var(--z-radius-full);
-    color: #93c5fd;
+    color: var(--z-text);
     font-size: 12px;
     font-weight: 600;
     cursor: pointer;
@@ -761,15 +754,15 @@
   }
 
   .catalog-mini-btn:hover {
-    background: rgba(59, 130, 246, 0.25);
-    border-color: #3b82f6;
+    background: var(--z-accent);
+    border-color: var(--z-accent);
     color: #ffffff;
     transform: translateY(-2px);
-    box-shadow: 0 4px 16px rgba(59, 130, 246, 0.25);
+    box-shadow: 0 4px 16px var(--z-accent-glow);
   }
 
   .catalog-badge {
-    background: #3b82f6;
+    background: var(--z-accent);
     color: #ffffff;
     font-size: 10px;
     font-weight: 700;
@@ -794,8 +787,8 @@
 
   .explore-search-input {
     width: 100%;
-    background: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: var(--z-surface);
+    border: 1px solid var(--z-border);
     border-radius: var(--z-radius-full);
     padding: 10px 40px 10px 40px;
     color: var(--z-text);
@@ -805,9 +798,9 @@
   }
 
   .explore-search-input:focus {
-    background: rgba(255, 255, 255, 0.07);
-    border-color: #3b82f6;
-    box-shadow: 0 0 16px rgba(59, 130, 246, 0.25);
+    background: var(--z-surface-raised);
+    border-color: var(--z-accent);
+    box-shadow: 0 0 0 3px var(--z-accent-muted);
   }
 
   .clear-search-btn {
@@ -844,7 +837,7 @@
   .clear-results-link {
     font-size: 12px;
     font-weight: 600;
-    color: #60a5fa;
+    color: var(--z-accent);
     background: none;
     border: none;
     cursor: pointer;
@@ -934,8 +927,8 @@
   }
 
   .catalog-search-input:focus {
-    border-color: #3b82f6;
-    box-shadow: 0 0 12px rgba(59, 130, 246, 0.25);
+    border-color: var(--z-accent);
+    box-shadow: 0 0 0 3px var(--z-accent-muted);
   }
 
   .lang-strip {
@@ -966,10 +959,10 @@
   }
 
   .lang-pill.active {
-    background: #2563eb;
-    border-color: #2563eb;
+    background: var(--z-accent);
+    border-color: var(--z-accent);
     color: #ffffff;
-    box-shadow: 0 2px 10px rgba(37, 99, 235, 0.4);
+    box-shadow: 0 2px 10px var(--z-accent-glow);
   }
 
   /* Sources Grid */
@@ -1012,24 +1005,23 @@
     align-items: center;
     gap: 8px;
     padding: 12px 28px;
-    background: rgba(30, 41, 59, 0.85);
-    backdrop-filter: blur(12px);
-    border: 1px solid rgba(59, 130, 246, 0.35);
+    background: var(--z-surface-raised);
+    border: 1px solid var(--z-border-hover);
     border-radius: var(--z-radius-full);
-    color: #93c5fd;
+    color: var(--z-text);
     font-size: var(--z-text-sm);
     font-weight: 600;
     cursor: pointer;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+    box-shadow: var(--z-shadow-card);
     transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   }
 
   .load-more-btn:hover {
-    background: rgba(37, 99, 235, 0.25);
-    border-color: #3b82f6;
+    background: var(--z-accent);
+    border-color: var(--z-accent);
     color: #ffffff;
     transform: translateY(-2px);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6), 0 0 18px rgba(59, 130, 246, 0.3);
+    box-shadow: 0 8px 24px var(--z-accent-glow);
   }
 
   .end-catalog-bar {
@@ -1068,7 +1060,7 @@
   }
 
   :global(.source-fallback-icon) {
-    color: #60a5fa;
+    color: var(--z-accent);
   }
 
   .pin-btn {
@@ -1119,15 +1111,15 @@
     justify-content: space-between;
     margin-top: auto;
     padding-top: var(--z-space-3);
-    border-top: 1px solid rgba(255, 255, 255, 0.05);
+    border-top: 1px solid var(--z-border);
   }
 
   .lang-tag {
     font-size: 10px;
     font-weight: 800;
     letter-spacing: 0.5px;
-    background: rgba(59, 130, 246, 0.15);
-    color: #60a5fa;
+    background: var(--z-accent-muted);
+    color: var(--z-accent);
     padding: 2px 8px;
     border-radius: 4px;
   }
@@ -1140,7 +1132,7 @@
   }
 
   .source-card:hover .open-link {
-    color: #60a5fa;
+    color: var(--z-accent);
   }
 
   /* BROWSE VIEW */
@@ -1245,9 +1237,9 @@
   }
 
   .segment-opt.active {
-    background: #2563eb;
+    background: var(--z-accent);
     color: #ffffff;
-    box-shadow: 0 2px 8px rgba(37, 99, 235, 0.4);
+    box-shadow: 0 2px 8px var(--z-accent-glow);
   }
 
   .source-search-wrap {

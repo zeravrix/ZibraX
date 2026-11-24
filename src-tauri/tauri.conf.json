@@ -23,7 +23,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' zibra-media: http://zibra-media.localhost https://zibra-media.localhost data: blob: https:; connect-src 'self' ipc: http://ipc.localhost https://ipc.localhost"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' zibra-media: http://zibra-media.localhost https://zibra-media.localhost asset: http://asset.localhost https://asset.localhost data: blob: https:; connect-src 'self' ipc: http://ipc.localhost https://ipc.localhost zibra-media: http://zibra-media.localhost https://zibra-media.localhost"
     }
   },
   "bundle": {

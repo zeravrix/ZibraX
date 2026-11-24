@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
-  import { appState, goBack, openReader, notify, toChronologicalChapters, mediaUrl } from '../stores/app.svelte.js';
+  import { appState, goBack, openReader, notify, toChronologicalChapters, mediaUrl, plainSnapshot } from '../stores/app.svelte.js';
   import { 
     ArrowLeft, Heart, Play, Download, BookOpen, 
     Check, ShieldAlert, X, CheckCircle, Clock
@@ -38,6 +38,7 @@
     if (!manga) return;
     loading = true;
     try {
+      invoke('record_history', { manga: plainSnapshot(manga) }).catch(() => {});
       isFavorite = await invoke('is_favorite', { mangaId: manga.id });
       progress = await invoke('get_reading_progress', { mangaId: manga.id });
 
@@ -45,10 +46,11 @@
       try {
         const enriched = await invoke('get_manga_details', {
           sourceId: manga.source_id,
-          manga,
+          manga: plainSnapshot(manga),
         });
         manga = enriched;
         appState.activeManga = enriched;
+        invoke('record_history', { manga: plainSnapshot(enriched) }).catch(() => {});
       } catch (e) {
         console.warn('Enriched details fetch note:', e);
       }
@@ -56,12 +58,9 @@
       // Fetch chapters & badges
       chapters = await invoke('get_chapters', {
         sourceId: manga.source_id,
-        manga,
+        manga: plainSnapshot(manga),
       });
       await refreshChapterBadges();
-
-      // Record in history
-      invoke('record_history', { manga });
     } catch (e) {
       console.error('Failed to load manga details:', e);
       notify('Failed to load details: ' + e);
@@ -139,11 +138,28 @@
   }
 
   async function handleToggleFavorite() {
+    if (!manga) return;
     try {
-      isFavorite = await invoke('toggle_favorite', { manga });
+      isFavorite = await invoke('toggle_favorite', { manga: plainSnapshot(manga) });
       notify(isFavorite ? 'Added to favourites' : 'Removed from favourites');
     } catch (e) {
       notify('Error updating favourite: ' + e);
+    }
+  }
+
+  async function handleMarkChapterRead(chapter) {
+    if (!manga || !chapter || readChapters.has(chapter.id)) return;
+    try {
+      await invoke('mark_chapter_read', {
+        manga: plainSnapshot(manga),
+        chapter: plainSnapshot(chapter),
+        totalPages: null,
+      });
+      readChapters.add(chapter.id);
+      readChapters = new Set(readChapters);
+      notify(`Marked "${chapter.title}" as read`);
+    } catch (e) {
+      notify('Error marking chapter read: ' + e);
     }
   }
 
@@ -166,9 +182,13 @@
     if (!manga) return;
     const nextStatus = manga.status === 'COMPLETED' ? 'READING' : 'COMPLETED';
     try {
-      await invoke('set_manga_status', { mangaId: manga.id, status: nextStatus });
+      await invoke('set_manga_status', {
+        mangaId: manga.id,
+        status: nextStatus,
+        manga: plainSnapshot(manga),
+      });
       manga.status = nextStatus;
-      appState.activeManga = { ...manga };
+      appState.activeManga = { ...plainSnapshot(manga) };
       notify(`Status: ${nextStatus === 'COMPLETED' ? 'Completed' : 'Reading'}`);
     } catch (e) {
       notify('Failed to update status: ' + e);
@@ -269,8 +289,9 @@
                 <span>Reading</span>
               {/if}
             </button>
-            <button class="icon-action-btn" class:fav={isFavorite} on:click={handleToggleFavorite} title={isFavorite ? "In Library" : "Add to Library"}>
-              <Heart size={18} fill={isFavorite ? "currentColor" : "none"} />
+            <button class="follow-btn" class:fav={isFavorite} on:click={handleToggleFavorite} title={isFavorite ? "Unfollow manga" : "Follow manga"}>
+              <Heart size={16} fill={isFavorite ? "currentColor" : "none"} />
+              <span>{isFavorite ? 'Following' : 'Follow'}</span>
             </button>
           </div>
         </div>
@@ -350,6 +371,17 @@
                   {/if}
                   <Play size={16} class="play-icon" />
                 </div>
+              </button>
+              <button
+                type="button"
+                class="ch-dl-btn"
+                class:downloaded={isRead}
+                title={isRead ? 'Marked as read' : 'Mark chapter as read'}
+                aria-label={isRead ? `${chapter.title} already read` : `Mark ${chapter.title} as read`}
+                disabled={isRead}
+                on:click={() => handleMarkChapterRead(chapter)}
+              >
+                <CheckCircle size={15} />
               </button>
               <button
                 type="button"
@@ -597,7 +629,7 @@
     gap: var(--z-space-2);
     padding: 12px 28px;
     background: var(--z-accent);
-    color: #ffffff;
+    color: var(--z-accent-fg, #ffffff);
     font-weight: 600;
     border-radius: var(--z-radius-md);
     box-shadow: 0 4px 16px var(--z-accent-glow);
@@ -609,22 +641,30 @@
     box-shadow: 0 6px 20px var(--z-accent-glow);
   }
 
-  .icon-action-btn {
-    width: 44px;
+  .follow-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
     height: 44px;
+    padding: 0 18px;
     border-radius: var(--z-radius-md);
     background: var(--z-surface-raised);
     border: 1px solid var(--z-border);
     color: var(--z-text);
+    font-size: var(--z-text-sm);
+    font-weight: 600;
     transition: all var(--z-duration-fast) var(--z-ease-out);
   }
 
-  .icon-action-btn.fav {
-    color: #ef4444;
+  .follow-btn.fav {
+    color: #f43f5e;
+    background: rgba(244, 63, 94, 0.14);
+    border-color: rgba(244, 63, 94, 0.4);
   }
 
-  .icon-action-btn:hover {
+  .follow-btn:hover {
     background: var(--z-border-hover);
+    border-color: var(--z-accent);
   }
 
   .status-btn {

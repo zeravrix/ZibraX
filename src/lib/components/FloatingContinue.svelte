@@ -138,7 +138,7 @@
     font-size: 9px;
     font-weight: 800;
     letter-spacing: 0.8px;
-    color: #60a5fa;
+    color: var(--z-accent);
     margin-bottom: 2px;
   }
 
@@ -146,8 +146,8 @@
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: #3b82f6;
-    box-shadow: 0 0 8px #3b82f6;
+    background: var(--z-accent);
+    box-shadow: 0 0 8px var(--z-accent-glow);
     animation: pulse 1.8s infinite;
   }
 
@@ -189,7 +189,7 @@
   }
 
   .floating-continue-card:hover .play-action-btn {
-    transform: scale(1.1);
-    background: #1d4ed8;
+    transform: scale(1.08);
+    filter: brightness(1.08);
   }
 </style>

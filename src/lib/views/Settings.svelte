@@ -1,7 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { appState, updateSettings, notify, navigate } from '../stores/app.svelte.js';
+  import { appState, updateSettings, loadSettings, notify, navigate } from '../stores/app.svelte.js';
   import { 
     Palette, BookOpen, Zap, ShieldCheck, Check, Trash2, Settings as SettingsIcon, Info, Server, Download, Upload
   } from 'lucide-svelte';
@@ -60,7 +60,7 @@
   ];
 
   const animationLevels = [
-    { id: 'Full', label: 'Full Motion' },
+    { id: 'Smooth', label: 'Smooth Motion' },
     { id: 'Reduced', label: 'Reduced' },
     { id: 'Off', label: 'No Motion' },
   ];
@@ -79,7 +79,10 @@
 
   let selectedPaletteIndex = $state(0);
 
-  onMount(() => {
+  onMount(async () => {
+    if (!appState.settings) {
+      await loadSettings();
+    }
     if (appState.settings) {
       currentSettings = JSON.parse(JSON.stringify(appState.settings));
       syncPaletteIndex();
@@ -294,7 +297,7 @@
               <button
                 type="button"
                 class="seg-btn"
-                class:active={(currentSettings.animation_level || 'Full') === lvl.id}
+                class:active={(currentSettings.animation_level || 'Smooth') === lvl.id || (lvl.id === 'Smooth' && currentSettings.animation_level === 'Full')}
                 on:click={() => selectAnimationLevel(lvl.id)}
               >
                 <span>{lvl.label}</span>
@@ -643,7 +646,7 @@
   }
 
   .about-shortcut-card {
-    border-color: rgba(66, 133, 244, 0.25);
+    border-color: var(--z-border-hover);
   }
 
   .about-card-content {
@@ -664,7 +667,7 @@
     width: 44px;
     height: 44px;
     object-fit: contain;
-    filter: drop-shadow(0 0 10px rgba(66, 133, 244, 0.45));
+    filter: drop-shadow(0 0 10px var(--z-accent-glow));
   }
 
   .about-action-btn {
@@ -673,7 +676,7 @@
     gap: 8px;
     padding: 10px 20px;
     background: var(--z-accent);
-    color: #ffffff;
+    color: var(--z-accent-fg, #ffffff);
     font-size: var(--z-text-sm);
     font-weight: 600;
     border-radius: var(--z-radius-md);
@@ -782,7 +785,7 @@
 
   .palette-btn.active {
     border-color: var(--z-accent);
-    background: rgba(255, 255, 255, 0.05);
+    background: var(--z-accent-muted);
   }
 
   .color-dot {
@@ -867,7 +870,7 @@
     font-size: 9px;
     font-weight: 700;
     background: var(--z-accent);
-    color: #ffffff;
+    color: var(--z-accent-fg, #ffffff);
     padding: 1px 6px;
     border-radius: 9999px;
     letter-spacing: 0.3px;
@@ -908,7 +911,7 @@
 
   .seg-btn.active {
     background: var(--z-accent);
-    color: #ffffff;
+    color: var(--z-accent-fg, #ffffff);
     font-weight: 600;
   }
 
@@ -946,7 +949,7 @@
     font-size: 11px;
     font-weight: 600;
     color: var(--z-text);
-    background: rgba(255, 255, 255, 0.08);
+    background: var(--z-border);
     padding: 2px 8px;
     border-radius: 9999px;
   }
@@ -954,7 +957,7 @@
   .slider-bar {
     position: relative;
     height: 6px;
-    background: rgba(255, 255, 255, 0.08);
+    background: var(--z-border);
     border-radius: 9999px;
     cursor: pointer;
     margin: 6px 0;

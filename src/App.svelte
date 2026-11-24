@@ -21,27 +21,31 @@
   {/if}
 
   <main class="main-content">
-    {#if appState.currentScreen === 'history'}
-      <Library mode="history" />
-    {:else if appState.currentScreen === 'favorites'}
-      <Library mode="favorites" />
-    {:else if appState.currentScreen === 'explore'}
-      <Explore initialMode="pinned" />
-    {:else if appState.currentScreen === 'sources'}
-      <Explore initialMode="catalog" />
-    {:else if appState.currentScreen === 'feed'}
-      <Library mode="feed" />
-    {:else if appState.currentScreen === 'downloads'}
-      <Library mode="downloads" />
-    {:else if appState.currentScreen === 'settings'}
-      <Settings />
-    {:else if appState.currentScreen === 'about'}
-      <About />
-    {:else if appState.currentScreen === 'details'}
-      <Details />
-    {:else if appState.currentScreen === 'reader'}
-      <Reader />
-    {/if}
+    {#key appState.currentScreen}
+      <div class="screen-stage">
+        {#if appState.currentScreen === 'history'}
+          <Library mode="history" />
+        {:else if appState.currentScreen === 'favorites'}
+          <Library mode="favorites" />
+        {:else if appState.currentScreen === 'explore'}
+          <Explore initialMode="pinned" />
+        {:else if appState.currentScreen === 'sources'}
+          <Explore initialMode="catalog" />
+        {:else if appState.currentScreen === 'feed'}
+          <Library mode="feed" />
+        {:else if appState.currentScreen === 'downloads'}
+          <Library mode="downloads" />
+        {:else if appState.currentScreen === 'settings'}
+          <Settings />
+        {:else if appState.currentScreen === 'about'}
+          <About />
+        {:else if appState.currentScreen === 'details'}
+          <Details />
+        {:else if appState.currentScreen === 'reader'}
+          <Reader />
+        {/if}
+      </div>
+    {/key}
   </main>
 
   {#if appState.currentScreen === 'history'}
@@ -75,6 +79,25 @@
     display: flex;
     position: relative;
     background: var(--z-bg);
+  }
+
+  .screen-stage {
+    flex: 1;
+    min-width: 0;
+    height: 100%;
+    display: flex;
+    animation: screenEnter 180ms var(--z-ease-out) both;
+  }
+
+  @keyframes screenEnter {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
   }
 
   .toast-notification {

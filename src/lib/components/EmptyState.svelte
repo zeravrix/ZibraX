@@ -48,7 +48,7 @@
     position: absolute;
     width: 160px;
     height: 160px;
-    background: radial-gradient(circle, rgba(59, 130, 246, 0.22) 0%, rgba(139, 92, 246, 0.08) 50%, transparent 70%);
+    background: radial-gradient(circle, var(--z-accent-glow) 0%, var(--z-accent-muted) 50%, transparent 70%);
     border-radius: 50%;
     filter: blur(20px);
     z-index: 1;
@@ -93,20 +93,20 @@
     align-items: center;
     gap: 8px;
     padding: 10px 22px;
-    background: #2563eb;
+    background: var(--z-accent);
     color: #ffffff;
     font-size: var(--z-text-sm);
     font-weight: 600;
     border-radius: var(--z-radius-full);
     border: none;
     cursor: pointer;
-    box-shadow: 0 4px 16px rgba(37, 99, 235, 0.4);
+    box-shadow: 0 4px 16px var(--z-accent-glow);
     transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   }
 
   .empty-action-btn:hover {
-    background: #1d4ed8;
+    filter: brightness(1.08);
     transform: translateY(-2px);
-    box-shadow: 0 8px 24px rgba(37, 99, 235, 0.5);
+    box-shadow: 0 8px 24px var(--z-accent-glow);
   }
 </style>

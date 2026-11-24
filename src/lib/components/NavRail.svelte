@@ -103,6 +103,8 @@
     user-select: none;
     box-sizing: border-box;
     overflow: hidden;
+    transition: width var(--z-duration-normal) var(--z-ease-out),
+                background var(--z-duration-normal) var(--z-ease-out);
   }
 
   .nav-rail.expanded {
@@ -144,7 +146,7 @@
     width: 32px;
     height: 32px;
     object-fit: contain;
-    filter: drop-shadow(0 0 10px rgba(66, 133, 244, 0.45));
+    filter: drop-shadow(0 0 10px var(--z-accent-glow));
     display: block;
   }
 
@@ -182,6 +184,17 @@
     background: var(--z-accent-muted);
     color: var(--z-accent);
     font-weight: 600;
+  }
+
+  .rail-item.active::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 8px;
+    bottom: 8px;
+    width: 3px;
+    border-radius: 0 3px 3px 0;
+    background: var(--z-accent);
   }
 
   .icon-wrap {

@@ -79,6 +79,7 @@ impl ReaderModePreference {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AnimationLevel {
+    #[serde(alias = "Full")]
     Smooth,
     Reduced,
     Off,
@@ -346,6 +347,7 @@ pub struct AppSettings {
     pub refresh_interval_hours: u32,
     pub animation_level: AnimationLevel,
     pub catalog_sort_mode: CatalogSortMode,
+    #[serde(default = "default_pinned_source_ids")]
     pub pinned_source_ids: HashSet<String>,
     pub custom_source_domains: HashMap<String, String>,
     pub custom_source_cookies: HashMap<String, String>,
@@ -414,10 +416,7 @@ impl AppSettingsStore {
 
     pub fn load(&self) -> AppSettings {
         if let Ok(text) = fs::read_to_string(&self.file_path) {
-            if let Ok(mut parsed) = serde_json::from_str::<AppSettings>(&text) {
-                if parsed.pinned_source_ids.is_empty() {
-                    parsed.pinned_source_ids = default_pinned_source_ids();
-                }
+            if let Ok(parsed) = serde_json::from_str::<AppSettings>(&text) {
                 return parsed;
             }
         }
