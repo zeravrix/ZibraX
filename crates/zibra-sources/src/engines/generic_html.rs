@@ -14,6 +14,13 @@ static A_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse("a[href]").unwrap())
 static IMG_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse("img").unwrap());
 static TITLE_SEL: Lazy<Selector> =
     Lazy::new(|| Selector::parse(".post-title, .entry-title, .item-title, .tt, h1, h2, h3, h4").unwrap());
+static LIST_CARD_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse(".page-item-detail, .manga-item, .item-summary, .row.c-tabs-item__content, .bs .bsx, .listupd .bsx, .utao .uta, article, .manga-card, .box, .content-genres-item, .story_item, .truyen-list .list-truyen-item-wrap, .comics-grid .comic-card").unwrap());
+static LIST_LINK_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse("a[href*='/manga/'], a[href*='/series/'], a[href*='/comic/'], a[href*='/comics/'], a[href*='/webtoon/'], a[href*='/manhwa/']").unwrap());
+static DETAIL_TITLE_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse("h1, .entry-title, .post-title, .story-info-right h1").unwrap());
+static DETAIL_DESC_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse(".description-summary, .summary__content, .entry-content[itemprop=description], .description, #noidungm, .panel-story-info-description, .post-content").unwrap());
+static DETAIL_IMG_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse(".summary_image img, .thumb img, .info-image img, .manga-thumb img, .cover img, .poster img").unwrap());
+static DETAIL_GENRE_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse(".genres-content a, .mgen a, a[href*='genre'], .genre a").unwrap());
+static CH_LINK_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse(".chapter-item a, .wp-manga-chapter a, .listing-chapters_wrap a, #chapterlist li a, .eplister ul li a, .row-content-chapter a, .chapter-list a, a.chapter-name, a[href*='/chapter'], a[href*='/episode'], a[href*='/chapitre'], a[href*='/ch-']").unwrap());
 
 pub struct GenericHtmlEngine {
     id: String,
@@ -190,11 +197,8 @@ impl GenericHtmlEngine {
             ]
         };
 
-        let card_sel = Selector::parse(
-            ".page-item-detail, .manga-item, .item-summary, .row.c-tabs-item__content, .bs .bsx, .listupd .bsx, .utao .uta, article, .manga-card, .box, .content-genres-item, .story_item, .truyen-list .list-truyen-item-wrap, .comics-grid .comic-card",
-        )
-        .unwrap();
-        let link_sel = Selector::parse("a[href*='/manga/'], a[href*='/series/'], a[href*='/comic/'], a[href*='/comics/'], a[href*='/webtoon/'], a[href*='/manhwa/']").unwrap();
+        let card_sel = &*LIST_CARD_SEL;
+        let link_sel = &*LIST_LINK_SEL;
 
         let mut items = Vec::new();
         let mut seen = HashSet::new();
@@ -272,13 +276,10 @@ impl Source for GenericHtmlEngine {
     async fn details(&self, manga: &Manga) -> anyhow::Result<Manga> {
         let html = self.fetch_html(&manga.id).await?;
         let doc = Html::parse_document(&html);
-        let title_sel = Selector::parse("h1, .entry-title, .post-title, .story-info-right h1").unwrap();
-        let desc_sel = Selector::parse(
-            ".description-summary, .summary__content, .entry-content[itemprop=description], .description, #noidungm, .panel-story-info-description, .post-content",
-        )
-        .unwrap();
-        let img_sel = Selector::parse(".summary_image img, .thumb img, .info-image img, .manga-thumb img, .cover img, .poster img").unwrap();
-        let genre_sel = Selector::parse(".genres-content a, .mgen a, a[href*='genre'], .genre a").unwrap();
+        let title_sel = &*DETAIL_TITLE_SEL;
+        let desc_sel = &*DETAIL_DESC_SEL;
+        let img_sel = &*DETAIL_IMG_SEL;
+        let genre_sel = &*DETAIL_GENRE_SEL;
 
         let mut updated = manga.clone();
         if let Some(t) = doc.select(&title_sel).next() {
@@ -315,10 +316,7 @@ impl Source for GenericHtmlEngine {
     async fn chapters(&self, manga: &Manga) -> anyhow::Result<Vec<Chapter>> {
         let html = self.fetch_html(&manga.id).await?;
         let doc = Html::parse_document(&html);
-        let ch_sel = Selector::parse(
-            ".chapter-item a, .wp-manga-chapter a, .listing-chapters_wrap a, #chapterlist li a, .eplister ul li a, .row-content-chapter a, .chapter-list a, a.chapter-name, a[href*='/chapter'], a[href*='/episode'], a[href*='/chapitre'], a[href*='/ch-']",
-        )
-        .unwrap();
+        let ch_sel = &*CH_LINK_SEL;
 
         let mut list = Vec::new();
         let mut seen = HashSet::new();

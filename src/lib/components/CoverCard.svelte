@@ -1,7 +1,7 @@
 <script>
   import { BookOpen, Heart, Copy, Trash2, CheckCircle, Clock } from 'lucide-svelte';
   import ContextMenu from './ContextMenu.svelte';
-  import { openManga, notify } from '../stores/app.svelte.js';
+  import { openManga, notify, mediaUrl } from '../stores/app.svelte.js';
 
   export let manga;
   export let progress = 0; // 0 to 1
@@ -15,12 +15,15 @@
   let showMenu = false;
   let menuPos = { x: 0, y: 0 };
 
-  const coverUrl = manga.cover_url || '';
-  const title = manga.title || 'Untitled';
+  $: rawCover = manga?.cover_url || '';
+  $: coverUrl = rawCover ? mediaUrl(rawCover, null, 'cover') : '';
+  $: title = manga?.title || 'Untitled';
+  $: if (rawCover !== undefined) { loaded = false; error = false; }
 
   function handleKeydown(e) {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
+      e.currentTarget.click();
     }
   }
 
@@ -72,13 +75,14 @@
   ];
 </script>
 
-<div class="card-container" on:contextmenu={handleContextMenu}>
+<div class="card-container">
   <div
     class="card"
     role="button"
     tabindex="0"
     on:click
     on:keydown={handleKeydown}
+    on:contextmenu={handleContextMenu}
     title={title}
   >
     <div class="cover-wrapper">
@@ -282,7 +286,7 @@
   }
 
   .circle-val {
-    font-size: 8.5px;
+    font-size: 10px;
     font-weight: 700;
     color: #ffffff;
     z-index: 2;

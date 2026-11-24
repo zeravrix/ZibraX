@@ -1,19 +1,21 @@
 <script>
   import { onMount } from 'svelte';
+  import { invoke } from '@tauri-apps/api/core';
   import { appState, updateSettings, notify, navigate } from '../stores/app.svelte.js';
   import { 
-    Palette, BookOpen, Zap, ShieldCheck, Check, Trash2, Settings as SettingsIcon, Info, Sliders, Maximize
+    Palette, BookOpen, Zap, ShieldCheck, Check, Trash2, Settings as SettingsIcon, Info, Server, Download, Upload
   } from 'lucide-svelte';
 
   let currentSettings = $state(null);
+  let backupInputEl = $state(null);
 
   const palettes = [
     { id: 'Totoro', name: 'ZibraX Blue', color: '#4285f4' },
     { id: 'Monet', name: 'Sky Azure', color: '#38bdf8' },
     { id: 'Miku', name: 'Teal', color: '#06b6d4' },
     { id: 'Mion', name: 'Emerald', color: '#34d399' },
-    { id: 'Itsuka', name: 'Amber', color: '#fbbf24' },
-    { id: 'Orange', name: 'Orange', color: '#f97316' },
+    { id: 'Itsuka', name: 'Sunset Orange', color: '#f97316' },
+    { id: 'Mamimi', name: 'Periwinkle', color: '#afc6ff' },
     { id: 'Asuka', name: 'Crimson', color: '#ef4444' },
     { id: 'Sakura', name: 'Rose', color: '#fb7185' },
     { id: 'Expressive', name: 'Lilac', color: '#c084fc' },
@@ -47,6 +49,20 @@
       theme: 'Light',
       colorPreview: '#f8fafc',
     },
+    {
+      id: 'auto',
+      label: 'System Auto',
+      desc: 'Follow OS light or dark appearance automatically',
+      isAmoled: false,
+      theme: 'Auto',
+      colorPreview: 'linear-gradient(135deg, #23212c 50%, #f8fafc 50%)',
+    },
+  ];
+
+  const animationLevels = [
+    { id: 'Full', label: 'Full Motion' },
+    { id: 'Reduced', label: 'Reduced' },
+    { id: 'Off', label: 'No Motion' },
   ];
 
   const readerModes = [
@@ -115,12 +131,60 @@
     await save();
   }
 
+  async function selectAnimationLevel(lvl) {
+    if (!currentSettings) return;
+    currentSettings.animation_level = lvl;
+    await save();
+  }
+
   async function save() {
     await updateSettings(currentSettings);
   }
 
-  function handleClearCache() {
-    notify('Image cache and temporary buffers cleared');
+  async function handleClearCache() {
+    try {
+      await invoke('clear_caches');
+      notify('Image RAM and disk caches cleared');
+    } catch (e) {
+      notify('Failed to clear caches: ' + e);
+    }
+  }
+
+  async function handleExportBackup() {
+    try {
+      const res = await invoke('export_backup');
+      const raw = atob(res.base64);
+      const arr = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+      const blob = new Blob([arr], { type: 'application/zip' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = res.file_name || 'zibra-backup.zip';
+      a.click();
+      URL.revokeObjectURL(url);
+      notify(`Backup saved to ${res.path}`);
+    } catch (e) {
+      notify('Backup export failed: ' + e);
+    }
+  }
+
+  async function handleImportBackup(e) {
+    const file = e.target?.files?.[0];
+    if (!file) return;
+    try {
+      const buf = await file.arrayBuffer();
+      const restored = await invoke('import_backup_bytes', { bytes: Array.from(new Uint8Array(buf)) });
+      const fresh = await invoke('get_settings');
+      appState.settings = fresh;
+      currentSettings = JSON.parse(JSON.stringify(fresh));
+      syncPaletteIndex();
+      notify(`Restored ${restored} backup files. Restart app if library changes don't appear immediately.`);
+    } catch (err) {
+      notify('Backup restore failed: ' + err);
+    } finally {
+      e.target.value = '';
+    }
   }
 
   function handleTrackClick(e, field, min, max, step) {
@@ -197,11 +261,12 @@
 
         <!-- DISPLAY THEME -->
         <div class="field-block">
-          <label class="field-label">Display Theme</label>
+          <span class="field-label">Display Theme</span>
           <div class="theme-mode-grid">
             {#each backgroundModes as mode}
               {@const isSelected = (mode.isAmoled && currentSettings.is_amoled) || (!currentSettings.is_amoled && currentSettings.theme === mode.theme)}
               <button
+                type="button"
                 class="theme-card"
                 class:selected={isSelected}
                 on:click={() => selectBackgroundMode(mode)}
@@ -216,6 +281,23 @@
                   </div>
                   <span class="theme-desc">{mode.desc}</span>
                 </div>
+              </button>
+            {/each}
+          </div>
+        </div>
+
+        <!-- ANIMATION MOTION -->
+        <div class="field-block">
+          <span class="field-label">Motion & Animations</span>
+          <div class="segmented-bar">
+            {#each animationLevels as lvl}
+              <button
+                type="button"
+                class="seg-btn"
+                class:active={(currentSettings.animation_level || 'Full') === lvl.id}
+                on:click={() => selectAnimationLevel(lvl.id)}
+              >
+                <span>{lvl.label}</span>
               </button>
             {/each}
           </div>
@@ -440,11 +522,74 @@
         <div class="setting-action-row">
           <div>
             <span class="toggle-title">Storage & Cache</span>
-            <span class="toggle-desc">Purge cached thumbnails, cookies, and temporary images</span>
+            <span class="toggle-desc">Purge cached page buffers and cover thumbnails</span>
           </div>
-          <button class="clear-btn" on:click={handleClearCache}>
+          <button type="button" class="clear-btn" on:click={handleClearCache}>
             <Trash2 size={14} />
             <span>Clear Cache</span>
+          </button>
+        </div>
+
+        <!-- BACKUP & RESTORE -->
+        <div class="setting-action-row">
+          <div>
+            <span class="toggle-title">Library & Settings Backup</span>
+            <span class="toggle-desc">Export or restore your library database and settings as a .zip archive</span>
+          </div>
+          <div class="row-actions">
+            <button type="button" class="action-secondary-btn" on:click={handleExportBackup}>
+              <Download size={14} />
+              <span>Export</span>
+            </button>
+            <button type="button" class="action-secondary-btn" on:click={() => backupInputEl?.click()}>
+              <Upload size={14} />
+              <span>Import</span>
+            </button>
+            <input
+              bind:this={backupInputEl}
+              type="file"
+              accept=".zip"
+              class="hidden-file-input"
+              on:change={handleImportBackup}
+            />
+          </div>
+        </div>
+      </section>
+
+      <!-- 5. SELF-HOSTED SERVERS -->
+      <section class="settings-card">
+        <div class="card-header">
+          <div class="icon-wrap"><Server size={18} /></div>
+          <div>
+            <h2 class="card-title">Self-Hosted Servers</h2>
+            <p class="card-subtitle">Configure Komga or Kavita instances and optional API keys.</p>
+          </div>
+        </div>
+
+        <div class="server-grid">
+          <div class="field-block">
+            <label for="komga-url" class="field-label">Komga Server URL</label>
+            <input id="komga-url" type="url" class="text-input" bind:value={currentSettings.komga_server_url} placeholder="http://localhost:25600" />
+          </div>
+          <div class="field-block">
+            <label for="komga-key" class="field-label">Komga API Key</label>
+            <input id="komga-key" type="password" class="text-input" bind:value={currentSettings.komga_api_key} placeholder="Optional X-API-Key" />
+          </div>
+          <div class="field-block">
+            <label for="kavita-url" class="field-label">Kavita Server URL</label>
+            <input id="kavita-url" type="url" class="text-input" bind:value={currentSettings.kavita_server_url} placeholder="http://localhost:5000" />
+          </div>
+          <div class="field-block">
+            <label for="kavita-key" class="field-label">Kavita API Key / Token</label>
+            <input id="kavita-key" type="password" class="text-input" bind:value={currentSettings.kavita_api_key} placeholder="Optional API key" />
+          </div>
+        </div>
+
+        <div class="setting-action-row">
+          <span class="toggle-desc">Applied immediately to Komga and Kavita sources upon saving.</span>
+          <button type="button" class="about-action-btn" on:click={async () => { await save(); notify('Server settings saved'); }}>
+            <Check size={14} />
+            <span>Save Servers</span>
           </button>
         </div>
       </section>
@@ -915,5 +1060,53 @@
 
   .clear-btn:hover {
     background: rgba(239, 68, 68, 0.22);
+  }
+
+  .row-actions {
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  .action-secondary-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    background: var(--z-surface-raised);
+    border: 1px solid var(--z-border);
+    color: var(--z-text);
+    font-size: var(--z-text-xs);
+    font-weight: 600;
+    border-radius: var(--z-radius-md);
+    transition: all 0.2s ease;
+  }
+
+  .action-secondary-btn:hover {
+    border-color: var(--z-accent);
+  }
+
+  .hidden-file-input {
+    display: none;
+  }
+
+  .server-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 12px;
+  }
+
+  .text-input {
+    width: 100%;
+    padding: 9px 12px;
+    border-radius: var(--z-radius-md);
+    background: var(--z-surface-raised);
+    border: 1px solid var(--z-border);
+    color: var(--z-text);
+    font-size: var(--z-text-sm);
+  }
+
+  .text-input:focus {
+    border-color: var(--z-accent);
   }
 </style>

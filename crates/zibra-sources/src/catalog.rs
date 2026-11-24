@@ -33,7 +33,7 @@ pub fn parse(json: &str) -> anyhow::Result<Vec<CatalogRecord>> {
     Ok(serde_json::from_str(json)?)
 }
 
-/// Host without scheme or `www.`, used to avoid registering the same site twice.
+/// Host without scheme or `www.`, used to match against `taken_hosts`.
 pub fn host_key(url_or_domain: &str) -> String {
     let s = url_or_domain
         .trim()
@@ -41,6 +41,18 @@ pub fn host_key(url_or_domain: &str) -> String {
         .trim_start_matches("http://");
     let host = s.split('/').next().unwrap_or(s).to_lowercase();
     host.trim_start_matches("www.").to_string()
+}
+
+/// Normalized host + non-empty path without scheme or `www.` so multi-locale sites
+/// sharing a domain (e.g., `toomics.com/en`, `toomics.com/fr`) stay distinct.
+fn catalog_dedup_key(url_or_domain: &str) -> String {
+    let s = url_or_domain
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_lowercase();
+    s.trim_start_matches("www.").to_string()
 }
 
 fn lang_tag(lang: &str) -> SourceTag {
@@ -64,7 +76,7 @@ pub fn build(
     taken_hosts: &HashSet<String>,
     first_rank: u32,
 ) -> (Vec<Arc<dyn Source>>, usize) {
-    let mut seen = taken_hosts.clone();
+    let mut seen_keys: HashSet<String> = HashSet::new();
     let mut out: Vec<Arc<dyn Source>> = Vec::new();
     let mut skipped = 0;
     for r in records {
@@ -73,7 +85,8 @@ pub fn build(
             continue;
         }
         let hk = host_key(&r.domain);
-        if hk.is_empty() || !seen.insert(hk) {
+        let dedup = catalog_dedup_key(&r.domain);
+        if hk.is_empty() || dedup.is_empty() || taken_hosts.contains(&hk) || !seen_keys.insert(dedup) {
             skipped += 1;
             continue;
         }
@@ -158,5 +171,18 @@ mod tests {
         let ids: Vec<_> = srcs.iter().map(|s| s.id().to_string()).collect();
         assert_eq!(ids, ["zibra:a", "zibra:c", "zibra:d"]);
         assert_eq!(skipped, 2);
+    }
+
+    #[test]
+    fn build_preserves_distinct_path_variants() {
+        let records = rec(r#"[
+            {"name":"ToomicsEN","title":"Toomics EN","lang":"en","domain":"toomics.com/en","family":"generic"},
+            {"name":"ToomicsFR","title":"Toomics FR","lang":"fr","domain":"https://www.toomics.com/fr/","family":"generic"},
+            {"name":"ToomicsENDup","title":"Toomics EN Dup","lang":"en","domain":"www.toomics.com/en","family":"generic"}
+        ]"#);
+        let (srcs, skipped) = build(&records, &reqwest::Client::new(), &HashSet::new(), 100);
+        let ids: Vec<_> = srcs.iter().map(|s| s.id().to_string()).collect();
+        assert_eq!(ids, ["zibra:toomicsen", "zibra:toomicsfr"]);
+        assert_eq!(skipped, 1);
     }
 }

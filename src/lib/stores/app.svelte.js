@@ -1,7 +1,33 @@
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { pushNavHistory, popNavHistory, toChronologicalChapters } from '../utils/readerNav.js';
 
 export { toChronologicalChapters };
+
+export function mediaUrl(rawUrl, referer = null, kind = 'page', headers = null) {
+  if (!rawUrl || typeof rawUrl !== 'string') return '';
+  const trimmed = rawUrl.trim();
+  if (
+    !trimmed ||
+    trimmed.startsWith('data:') ||
+    trimmed.startsWith('blob:') ||
+    trimmed.startsWith('zibra-media:') ||
+    trimmed.startsWith('/logo') ||
+    trimmed.startsWith('/chibi')
+  ) {
+    return trimmed;
+  }
+  const payloadObj = { u: trimmed, r: referer || null, k: kind };
+  if (headers && typeof headers === 'object' && Object.keys(headers).length > 0) {
+    payloadObj.h = headers;
+  }
+  const bytes = new TextEncoder().encode(JSON.stringify(payloadObj));
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) {
+    bin += String.fromCharCode(bytes[i]);
+  }
+  const b64url = btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return convertFileSrc(`v1/${b64url}`, 'zibra-media');
+}
 
 export const appState = $state({
   currentScreen: 'history',
@@ -80,9 +106,9 @@ const PALETTE_COLORS = {
   mion: '#34d399',
   rikka: '#a78bfa',
   sakura: '#fb7185',
-  mamimi: '#60a5fa',
+  mamimi: '#afc6ff',
   kanade: '#cbd5e1',
-  itsuka: '#fbbf24',
+  itsuka: '#f97316',
   amoledvoid: '#3b82f6',
   highcontrast: '#ffffff',
   blue: '#4285f4',
@@ -95,11 +121,30 @@ const PALETTE_COLORS = {
   yellow: '#eab308',
 };
 
+let systemThemeListenerRegistered = false;
+
 export function applyTheme(settings) {
   if (!settings) return;
   const root = document.documentElement;
-  const theme = settings.is_amoled ? 'amoled' : (settings.theme?.toLowerCase() || settings.app_theme?.toLowerCase() || 'dark');
+  let theme = settings.is_amoled
+    ? 'amoled'
+    : (settings.theme?.toLowerCase() || settings.app_theme?.toLowerCase() || 'dark');
+
+  if (theme === 'auto') {
+    const prefersDark = typeof window !== 'undefined'
+      && window.matchMedia?.('(prefers-color-scheme: dark)').matches;
+    theme = prefersDark ? 'dark' : 'light';
+    if (typeof window !== 'undefined' && window.matchMedia && !systemThemeListenerRegistered) {
+      systemThemeListenerRegistered = true;
+      window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+        if (appState.settings) applyTheme(appState.settings);
+      });
+    }
+  }
+
   root.setAttribute('data-theme', theme);
+  const motion = String(settings.animation_level || 'full').toLowerCase();
+  root.setAttribute('data-motion', motion);
   const themeKey = String(settings.color_theme || 'totoro').toLowerCase();
   const hex = PALETTE_COLORS[themeKey] || (themeKey.startsWith('#') ? themeKey : '#4285f4');
   root.setAttribute('data-accent', themeKey);

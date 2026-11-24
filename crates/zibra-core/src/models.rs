@@ -167,6 +167,8 @@ pub struct ReadingProgress {
     pub manga_id: String,
     pub chapter_id: String,
     pub page_index: usize,
+    #[serde(default)]
+    pub total_pages: Option<usize>,
     pub scroll_offset_y: f32,
     pub chapter_number: Option<f32>,
     pub updated_at: i64,

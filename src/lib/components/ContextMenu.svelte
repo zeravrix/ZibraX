@@ -13,14 +13,19 @@
 
 <div
   class="context-menu"
+  role="menu"
+  tabindex="-1"
   style="top: {Math.max(10, Math.min(y, (typeof window !== 'undefined' ? window.innerHeight : 800) - (items.length * 38 + 24)))}px; left: {Math.max(10, Math.min(x, (typeof window !== 'undefined' ? window.innerWidth : 1200) - 200))}px;"
   on:click|stopPropagation
+  on:keydown|stopPropagation={handleKeydown}
 >
   {#each items as item}
     {#if item.divider}
       <div class="menu-divider"></div>
     {:else}
       <button
+        type="button"
+        role="menuitem"
         class="menu-item"
         class:danger={item.danger}
         on:click={() => { item.action?.(); onClose(); }}
@@ -39,13 +44,13 @@
     position: fixed;
     z-index: 10000;
     min-width: 185px;
-    background: rgba(18, 18, 28, 0.95);
+    background: var(--z-surface-overlay);
     backdrop-filter: blur(24px);
     -webkit-backdrop-filter: blur(24px);
-    border: 1px solid rgba(255, 255, 255, 0.12);
+    border: 1px solid var(--z-border-hover);
     border-radius: 12px;
     padding: 6px;
-    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.8), 0 0 1px 1px rgba(255, 255, 255, 0.08);
+    box-shadow: var(--z-shadow-card);
     display: flex;
     flex-direction: column;
     gap: 2px;
@@ -65,7 +70,7 @@
     background: transparent;
     border: none;
     border-radius: 8px;
-    color: #e4e4e7;
+    color: var(--z-text);
     font-size: 12.5px;
     font-weight: 500;
     cursor: pointer;
@@ -75,17 +80,17 @@
   }
 
   .menu-item:hover {
-    background: rgba(59, 130, 246, 0.22);
-    color: #ffffff;
+    background: var(--z-accent-muted);
+    color: var(--z-text);
   }
 
   .menu-item.danger {
-    color: #fca5a5;
+    color: #ef4444;
   }
 
   .menu-item.danger:hover {
-    background: rgba(239, 68, 68, 0.22);
-    color: #f87171;
+    background: rgba(239, 68, 68, 0.18);
+    color: #dc2626;
   }
 
   :global(.menu-icon) {
@@ -95,7 +100,7 @@
 
   .menu-divider {
     height: 1px;
-    background: rgba(255, 255, 255, 0.08);
+    background: var(--z-border);
     margin: 4px 0;
   }
 </style>

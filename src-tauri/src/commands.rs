@@ -1,9 +1,13 @@
 use crate::state::AppState;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use tauri::State;
-use zibra_core::{AppSettings, CatalogSortMode, Chapter, DownloadStatus, Manga, MangaPage, ReadingProgress, SourceTag};
+use zibra_core::{
+    detect_image_ext, AppSettings, BackupManager, CatalogSortMode, Chapter, DownloadStatus,
+    DownloadedChapter, Manga, MangaPage, ReadingProgress, SourceTag,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceInfo {
@@ -27,12 +31,23 @@ pub struct MangaPageResultDto {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadItemDto {
     pub chapter_id: String,
+    pub manga_id: String,
+    pub source_id: String,
     pub manga_title: String,
     pub chapter_title: String,
+    pub cover_url: Option<String>,
+    pub archive_path: Option<String>,
     pub status: String,
     pub progress: f32,
     pub total_pages: usize,
     pub downloaded_pages: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupExportDto {
+    pub path: String,
+    pub file_name: String,
+    pub base64: String,
 }
 
 #[tauri::command]
@@ -89,7 +104,9 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, Str
 
 #[tauri::command]
 pub async fn save_settings(state: State<'_, AppState>, settings: AppSettings) -> Result<(), String> {
-    state.settings_store.save(&settings).map_err(|e| e.to_string())
+    state.settings_store.save(&settings).map_err(|e| e.to_string())?;
+    state.reload_registry(&settings);
+    Ok(())
 }
 
 #[tauri::command]
@@ -106,8 +123,9 @@ pub async fn get_sources(
 
     let pinned: HashSet<String> = settings.pinned_source_ids.into_iter().collect();
     let tags: HashSet<SourceTag> = HashSet::new();
+    let registry = state.registry();
 
-    let sources = state.registry.ordered_catalog(
+    let sources = registry.ordered_catalog(
         CatalogSortMode::RecommendedOrder,
         &pinned,
         &tags,
@@ -127,7 +145,7 @@ pub async fn get_sources(
             priority_rank: s.priority_rank(),
             tags: s.tags().iter().map(|t| t.label().to_string()).collect(),
             is_nsfw: s.is_nsfw(),
-            latency_ms: state.registry.latency_for(s.id()),
+            latency_ms: registry.latency_for(s.id()),
         })
         .collect();
 
@@ -147,7 +165,7 @@ pub async fn fetch_source_page(
     let nsfw = nsfw_enabled.unwrap_or(settings.nsfw_enabled);
 
     let result = state
-        .registry
+        .registry()
         .fetch_from_source(&source_id, page, latest, query.as_deref(), nsfw)
         .await
         .map_err(|e| e.to_string())?;
@@ -173,7 +191,7 @@ pub async fn search_global(
         settings.pinned_source_ids.into_iter().collect()
     };
 
-    let results = state.registry.search_global(&query, &pinned, nsfw).await;
+    let results = state.registry().search_global(&query, &pinned, nsfw).await;
     Ok(results)
 }
 
@@ -184,7 +202,7 @@ pub async fn get_manga_details(
     manga: Manga,
 ) -> Result<Manga, String> {
     let src = state
-        .registry
+        .registry()
         .get(&source_id)
         .ok_or_else(|| format!("Source '{}' not found", source_id))?;
 
@@ -214,7 +232,7 @@ pub async fn get_chapters(
     manga: Manga,
 ) -> Result<Vec<Chapter>, String> {
     let src = state
-        .registry
+        .registry()
         .get(&source_id)
         .ok_or_else(|| format!("Source '{}' not found", source_id))?;
 
@@ -227,8 +245,15 @@ pub async fn get_pages(
     source_id: String,
     chapter: Chapter,
 ) -> Result<Vec<MangaPage>, String> {
+    if let Some(dl) = state.downloader.find_downloaded_chapter(&chapter.id) {
+        let local = state.downloader.local_pages(&dl);
+        if !local.is_empty() {
+            return Ok(local);
+        }
+    }
+
     let src = state
-        .registry
+        .registry()
         .get(&source_id)
         .ok_or_else(|| format!("Source '{}' not found", source_id))?;
 
@@ -241,59 +266,105 @@ pub async fn fetch_image_base64(
     url: String,
     referer: Option<String>,
 ) -> Result<String, String> {
-    let mut req = state.http_client.get(&url);
-    if let Some(ref r) = referer {
-        req = req.header("Referer", r);
+    let mut page = MangaPage::new(0, url.clone(), referer);
+    let mut allow_private = false;
+    if let Some((kind, key)) = state.self_hosted_match(&url) {
+        allow_private = true;
+        if !key.is_empty() {
+            page.headers.insert("X-API-Key".to_string(), key.clone());
+            if kind == "KAVITA" {
+                page.headers
+                    .insert("Authorization".to_string(), format!("Bearer {}", key));
+            }
+        }
     }
-    req = req.header("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8");
-
-    let resp = req.send().await.map_err(|e| e.to_string())?.error_for_status().map_err(|e| e.to_string())?;
-    let content_type = resp
-        .headers()
-        .get("content-type")
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("image/jpeg")
-        .to_string();
-
-    if !content_type.starts_with("image/") {
-        return Err(format!("not an image ({content_type}) - likely a Cloudflare/error page"));
-    }
-
-    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    let bytes = state
+        .reader_pipeline
+        .fetch_raw_bytes_with_policy(&page, allow_private)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mime = sniff_mime(&bytes);
     let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Ok(format!("data:{};base64,{}", content_type, encoded))
+    Ok(format!("data:{};base64,{}", mime, encoded))
+}
+
+pub fn sniff_mime(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml") {
+        return "image/svg+xml";
+    }
+    match detect_image_ext(bytes) {
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "avif" => "image/avif",
+        "ico" => "image/x-icon",
+        _ => "image/jpeg",
+    }
 }
 
 #[tauri::command]
 pub async fn get_downloads(state: State<'_, AppState>) -> Result<Vec<DownloadItemDto>, String> {
     let jobs = state.downloader.jobs();
-    let dtos = jobs
-        .into_iter()
-        .map(|item| {
-            let (status_str, progress) = match &item.status {
-                DownloadStatus::Queued => ("Queued".to_string(), 0.0),
-                DownloadStatus::Downloading { completed_pages, total_pages } => {
-                    let prog = if *total_pages > 0 {
-                        *completed_pages as f32 / *total_pages as f32
-                    } else {
-                        0.0
-                    };
-                    ("Downloading".to_string(), prog)
-                }
-                DownloadStatus::Completed { .. } => ("Completed".to_string(), 1.0),
-                DownloadStatus::Failed { error } => (format!("Failed: {}", error), 0.0),
-            };
-            DownloadItemDto {
-                chapter_id: item.chapter.id.clone(),
-                manga_title: item.manga.title.clone(),
-                chapter_title: item.chapter.title.clone(),
-                status: status_str,
-                progress,
-                total_pages: 0,
-                downloaded_pages: 0,
+    let disk = state.downloader.list_downloaded();
+
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut dtos: Vec<DownloadItemDto> = Vec::with_capacity(jobs.len() + disk.len());
+
+    for item in jobs {
+        seen.insert(item.chapter.id.clone());
+        let (status_str, progress, total_pages, downloaded_pages, archive_path) = match &item.status {
+            DownloadStatus::Queued => ("Queued".to_string(), 0.0, 0, 0, None),
+            DownloadStatus::Downloading { completed_pages, total_pages } => {
+                let prog = if *total_pages > 0 {
+                    *completed_pages as f32 / *total_pages as f32
+                } else {
+                    0.0
+                };
+                ("Downloading".to_string(), prog, *total_pages, *completed_pages, None)
             }
-        })
-        .collect();
+            DownloadStatus::Completed { archive_path } => (
+                "Completed".to_string(),
+                1.0,
+                0,
+                0,
+                Some(archive_path.to_string_lossy().to_string()),
+            ),
+            DownloadStatus::Failed { error } => (format!("Failed: {}", error), 0.0, 0, 0, None),
+        };
+        dtos.push(DownloadItemDto {
+            chapter_id: item.chapter.id.clone(),
+            manga_id: item.manga.id.clone(),
+            source_id: item.manga.source_id.clone(),
+            manga_title: item.manga.title.clone(),
+            chapter_title: item.chapter.title.clone(),
+            cover_url: item.manga.cover_url.clone(),
+            archive_path,
+            status: status_str,
+            progress,
+            total_pages,
+            downloaded_pages,
+        });
+    }
+
+    for dl in disk {
+        if !seen.insert(dl.chapter_id.clone()) {
+            continue;
+        }
+        dtos.push(DownloadItemDto {
+            chapter_id: dl.chapter_id,
+            manga_id: dl.manga_id,
+            source_id: dl.source_id,
+            manga_title: dl.manga_title,
+            chapter_title: dl.chapter_title,
+            cover_url: dl.manga_cover_url,
+            archive_path: dl.archive_path.map(|p| p.to_string_lossy().to_string()),
+            status: "Completed".to_string(),
+            progress: 1.0,
+            total_pages: dl.page_count,
+            downloaded_pages: dl.page_count,
+        });
+    }
 
     Ok(dtos)
 }
@@ -305,7 +376,7 @@ pub async fn queue_download(
     chapter: Chapter,
 ) -> Result<(), String> {
     let src = state
-        .registry
+        .registry()
         .get(&chapter.source_id)
         .ok_or_else(|| format!("Source '{}' not found", chapter.source_id))?;
 
@@ -318,7 +389,105 @@ pub async fn queue_download(
 }
 
 #[tauri::command]
-pub async fn cancel_download(_state: State<'_, AppState>, _chapter_id: String) -> Result<(), String> {
+pub async fn cancel_download(state: State<'_, AppState>, chapter_id: String) -> Result<bool, String> {
+    Ok(state.downloader.cancel_download(&chapter_id))
+}
+
+#[tauri::command]
+pub async fn get_downloaded_chapters(state: State<'_, AppState>) -> Result<Vec<DownloadedChapter>, String> {
+    Ok(state.downloader.list_downloaded())
+}
+
+#[tauri::command]
+pub async fn delete_downloaded_chapter(
+    state: State<'_, AppState>,
+    archive_path: String,
+) -> Result<(), String> {
+    state
+        .downloader
+        .delete_downloaded(Path::new(&archive_path))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn clear_caches(state: State<'_, AppState>) -> Result<(), String> {
+    state.reader_pipeline.clear_caches();
+    state.cover_cache.clear_caches();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_read_chapters(
+    state: State<'_, AppState>,
+    manga_id: String,
+) -> Result<Vec<String>, String> {
+    Ok(state.library.read_chapter_ids(&manga_id).into_iter().collect())
+}
+
+#[tauri::command]
+pub async fn export_backup(state: State<'_, AppState>) -> Result<BackupExportDto, String> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let file_name = format!("zibra-backup-{}.zip", ts);
+    let dest = state.app_dir.join("backups").join(&file_name);
+    let manager = BackupManager::new(&state.app_dir);
+    manager.export_backup(&dest).map_err(|e| e.to_string())?;
+    let bytes = std::fs::read(&dest).map_err(|e| e.to_string())?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok(BackupExportDto {
+        path: dest.to_string_lossy().to_string(),
+        file_name,
+        base64: encoded,
+    })
+}
+
+#[tauri::command]
+pub async fn import_backup_bytes(
+    state: State<'_, AppState>,
+    bytes: Vec<u8>,
+) -> Result<usize, String> {
+    if bytes.is_empty() || bytes.len() > 64 * 1024 * 1024 {
+        return Err("Backup file is empty or exceeds 64 MB limit".to_string());
+    }
+    let backups_dir = state.app_dir.join("backups");
+    let _ = std::fs::create_dir_all(&backups_dir);
+    let tmp = backups_dir.join(format!("import_{}.zip.tmp", std::process::id()));
+    std::fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
+    let res = BackupManager::new(&state.app_dir).import_backup(&tmp);
+    let _ = std::fs::remove_file(&tmp);
+    let restored = res.map_err(|e| e.to_string())?;
+    let settings = state.settings_store.load();
+    state.reload_registry(&settings);
+    Ok(restored)
+}
+
+#[tauri::command]
+pub async fn open_external_url(url: String) -> Result<(), String> {
+    let parsed = url::Url::parse(url.trim()).map_err(|e| e.to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("Only http/https external URLs are permitted".to_string());
+    }
+    #[cfg(target_os = "linux")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(parsed.as_str());
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg(parsed.as_str());
+        c
+    };
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", "", parsed.as_str()]);
+        c
+    };
+    cmd.spawn().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -429,7 +598,10 @@ pub fn save_source_cookies_inner(
     let target_url = base_url
         .and_then(|u| u.parse::<url::Url>().ok())
         .or_else(|| {
-            state.registry.get(source_id).and_then(|s| s.base_url().parse::<url::Url>().ok())
+            state
+                .registry()
+                .get(source_id)
+                .and_then(|s| s.base_url().parse::<url::Url>().ok())
         });
 
     // If cookie is empty, automatically attempt extraction from webview cookie storage!
@@ -464,6 +636,15 @@ pub async fn open_cloudflare_solver(
 ) -> Result<(), String> {
     use tauri::Manager;
     let parsed_url: url::Url = url.parse().map_err(|e: url::ParseError| e.to_string())?;
+    if !matches!(parsed_url.scheme(), "http" | "https") {
+        return Err("Cloudflare solver only accepts http/https URLs".to_string());
+    }
+
+    let src_id = source_id.unwrap_or_else(|| {
+        parsed_url.host_str().unwrap_or("unknown").to_string()
+    });
+    let base_url_str = parsed_url.to_string();
+    *app.state::<AppState>().active_cf_target.write() = Some((src_id.clone(), base_url_str.clone()));
 
     if let Some(window) = app.get_webview_window("cloudflare-solver") {
         let _ = window.show();
@@ -474,10 +655,6 @@ pub async fn open_cloudflare_solver(
 
     let win_title = title.unwrap_or_else(|| "Z Browser — Cloudflare Verification".to_string());
     let app_handle = app.clone();
-    let src_id = source_id.unwrap_or_else(|| {
-        parsed_url.host_str().unwrap_or("unknown").to_string()
-    });
-    let base_url_str = url.clone();
 
     let init_script = r#"
         (function() {
@@ -559,15 +736,47 @@ pub async fn open_cloudflare_solver(
     .initialization_script(init_script)
     .on_navigation(move |nav_url| {
         if nav_url.host_str() == Some("zibra.local") && nav_url.path() == "/sync-cf" {
-            let pairs: std::collections::HashMap<_, _> = nav_url.query_pairs().into_owned().collect();
-            let cookie_str = pairs.get("c").cloned().unwrap_or_default();
+            let pairs: HashMap<_, _> = nav_url.query_pairs().into_owned().collect();
+            let doc_cookie_str = pairs.get("c").cloned().unwrap_or_default();
             let app_h = app_handle.clone();
-            let s_id = src_id.clone();
-            let b_url = base_url_str.clone();
 
             tauri::async_runtime::spawn(async move {
                 let state = app_h.state::<AppState>();
-                let saved = save_source_cookies_inner(&state, &s_id, &cookie_str, Some(&b_url)).unwrap_or_default();
+                let Some((s_id, b_url)) = state.active_cf_target.read().clone() else {
+                    if let Some(win) = app_h.get_webview_window("cloudflare-solver") {
+                        let _ = win.close();
+                    }
+                    return;
+                };
+
+                // Extract HttpOnly + non-HttpOnly cookies natively from the WebviewWindow first.
+                let mut merged: HashMap<String, String> = HashMap::new();
+                for part in doc_cookie_str.split(';') {
+                    if let Some((k, v)) = part.trim().split_once('=') {
+                        if !k.trim().is_empty() && !v.trim().is_empty() {
+                            merged.insert(k.trim().to_string(), v.trim().to_string());
+                        }
+                    }
+                }
+                if let Some(win) = app_h.get_webview_window("cloudflare-solver") {
+                    if let Ok(target) = b_url.parse::<url::Url>() {
+                        if let Ok(native_cookies) = win.cookies_for_url(target) {
+                            for c in native_cookies {
+                                if !c.name().is_empty() && !c.value().is_empty() {
+                                    merged.insert(c.name().to_string(), c.value().to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                let combined_cookie = merged
+                    .into_iter()
+                    .map(|(k, v)| format!("{}={}", k, v))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+
+                let saved = save_source_cookies_inner(&state, &s_id, &combined_cookie, Some(&b_url))
+                    .unwrap_or_default();
                 if let Some(win) = app_h.get_webview_window("cloudflare-solver") {
                     let _ = win.close();
                 }
@@ -639,10 +848,23 @@ mod tests {
             .cookie_provider(cookie_jar.clone())
             .build()
             .unwrap();
-        let registry = std::sync::Arc::new(zibra_sources::LiveSourceRegistry::new_with_client(http_client.clone()));
-        let downloader = std::sync::Arc::new(zibra_core::DesktopDownloader::new(&temp_dir, 2));
-        let reader_pipeline = std::sync::Arc::new(zibra_reader::ReaderPagePipeline::new(&temp_dir, 128));
-        let cover_cache = std::sync::Arc::new(zibra_reader::CoverImageCache::new(&temp_dir));
+        let registry = std::sync::Arc::new(parking_lot::RwLock::new(std::sync::Arc::new(
+            zibra_sources::LiveSourceRegistry::new_with_client(http_client.clone()),
+        )));
+        let downloader = std::sync::Arc::new(zibra_core::DesktopDownloader::new_with_client(
+            &temp_dir,
+            2,
+            http_client.clone(),
+        ));
+        let reader_pipeline = std::sync::Arc::new(zibra_reader::ReaderPagePipeline::new_with_client(
+            &temp_dir,
+            128,
+            http_client.clone(),
+        ));
+        let cover_cache = std::sync::Arc::new(zibra_reader::CoverImageCache::new_with_client(
+            &temp_dir,
+            http_client.clone(),
+        ));
 
         let state = AppState {
             app_dir: temp_dir.clone(),
@@ -654,6 +876,7 @@ mod tests {
             cover_cache,
             http_client,
             cookie_jar: cookie_jar.clone(),
+            active_cf_target: std::sync::Arc::new(parking_lot::RwLock::new(None)),
         };
 
         let cookie_str = "cf_clearance=mock_cf_token_12345; __cf_bm=mock_bm_67890; csrftoken=abc";
@@ -695,6 +918,12 @@ mod tests {
         let header = cookie_jar.cookies(&check_url).unwrap();
         let header_str = header.to_str().unwrap();
         assert!(header_str.contains("cf_clearance=test_clearance_abc123"));
+    }
+
+    #[tokio::test]
+    async fn test_open_external_url_scheme_guard() {
+        assert!(open_external_url("javascript:alert(1)".to_string()).await.is_err());
+        assert!(open_external_url("file:///etc/passwd".to_string()).await.is_err());
     }
 }
 

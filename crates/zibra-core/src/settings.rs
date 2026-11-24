@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 pub enum AppTheme {
     Dark,
     Light,
+    Auto,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +96,7 @@ pub enum ColorTheme {
     Sakura,
     Mamimi,
     Kanade,
+    #[serde(alias = "Orange")]
     Itsuka,
     AmoledVoid,
     HighContrast,

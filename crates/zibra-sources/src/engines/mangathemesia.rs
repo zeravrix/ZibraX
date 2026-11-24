@@ -4,9 +4,21 @@ use crate::extractor::{
 };
 use crate::{MangaPageResult, Source};
 use async_trait::async_trait;
+use once_cell::sync::Lazy;
 use scraper::{Html, Selector};
 use std::collections::{HashMap, HashSet};
 use zibra_core::{Chapter, Manga, MangaPage, SourceTag};
+
+static CARD_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse(".bs .bsx, .listupd .bsx, .utao .uta, article.bs, .animposx, .box, .page-item-detail, .manga-item, .col-6, article").unwrap());
+static LINK_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse("a[href]").unwrap());
+static TITLE_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse(".tt, .entry-title, h3, h4, h5").unwrap());
+static IMG_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse("img").unwrap());
+static DIRECT_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse("a[href*='/manga/'], a[href*='/series/'], a[href*='/comics/'], a[href*='/comic/'], a[href*='/komik/'], a[href*='/manhwa/']").unwrap());
+static DETAIL_TITLE_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse("h1.entry-title, .infox h1, h1").unwrap());
+static DETAIL_DESC_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse(".entry-content[itemprop=description], .desc, .summary__content").unwrap());
+static DETAIL_IMG_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse(".thumb img, .infomanga img").unwrap());
+static CH_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse("#chapterlist li a, .eplister ul li a, .bxcl ul li a").unwrap());
+static NUM_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse(".chapternum").unwrap());
 
 pub struct MangaThemesiaEngine {
     id: String,
@@ -51,13 +63,11 @@ impl MangaThemesiaEngine {
     }
 
     async fn fetch_candidates(&self, candidates: &[String]) -> anyhow::Result<MangaPageResult> {
-        let card_sel = Selector::parse(
-            ".bs .bsx, .listupd .bsx, .utao .uta, article.bs, .animposx, .box, .page-item-detail, .manga-item, .col-6, article",
-        ).unwrap();
-        let link_sel = Selector::parse("a[href]").unwrap();
-        let title_sel = Selector::parse(".tt, .entry-title, h3, h4, h5").unwrap();
-        let img_sel = Selector::parse("img").unwrap();
-        let direct_sel = Selector::parse("a[href*='/manga/'], a[href*='/series/'], a[href*='/comics/'], a[href*='/comic/'], a[href*='/komik/'], a[href*='/manhwa/']").unwrap();
+        let card_sel = &*CARD_SEL;
+        let link_sel = &*LINK_SEL;
+        let title_sel = &*TITLE_SEL;
+        let img_sel = &*IMG_SEL;
+        let direct_sel = &*DIRECT_SEL;
 
         let mut items = Vec::new();
         let mut seen = HashSet::new();
@@ -254,9 +264,9 @@ impl Source for MangaThemesiaEngine {
     async fn details(&self, manga: &Manga) -> anyhow::Result<Manga> {
         let html = self.fetch_html(&manga.id).await?;
         let doc = Html::parse_document(&html);
-        let title_sel = Selector::parse("h1.entry-title, .infox h1, h1").unwrap();
-        let desc_sel = Selector::parse(".entry-content[itemprop=description], .desc, .summary__content").unwrap();
-        let img_sel = Selector::parse(".thumb img, .infomanga img").unwrap();
+        let title_sel = &*DETAIL_TITLE_SEL;
+        let desc_sel = &*DETAIL_DESC_SEL;
+        let img_sel = &*DETAIL_IMG_SEL;
 
         let mut updated = manga.clone();
         if let Some(t) = doc.select(&title_sel).next() {
@@ -280,8 +290,8 @@ impl Source for MangaThemesiaEngine {
     async fn chapters(&self, manga: &Manga) -> anyhow::Result<Vec<Chapter>> {
         let html = self.fetch_html(&manga.id).await?;
         let doc = Html::parse_document(&html);
-        let ch_sel = Selector::parse("#chapterlist li a, .eplister ul li a, .bxcl ul li a").unwrap();
-        let num_sel = Selector::parse(".chapternum").unwrap();
+        let ch_sel = &*CH_SEL;
+        let num_sel = &*NUM_SEL;
 
         let mut chapters = Vec::new();
         let mut seen = HashSet::new();

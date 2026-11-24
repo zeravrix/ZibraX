@@ -9,6 +9,8 @@ const IMAGE_EXTENSIONS: &[&str] = &[
     "jpg", "jpeg", "png", "webp", "gif", "bmp", "avif", "heic", "jxl",
 ];
 
+pub const MAX_ARCHIVE_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct ArchiveImage {
     pub entry_name: String,
@@ -117,9 +119,24 @@ impl ChapterArchive {
     pub fn read_entry(archive: &Path, entry_name: &str) -> anyhow::Result<Vec<u8>> {
         let file = File::open(archive)?;
         let mut zip = ZipArchive::new(file)?;
-        let mut entry = zip.by_name(entry_name)?;
-        let mut buf = Vec::with_capacity(entry.size() as usize);
-        entry.read_to_end(&mut buf)?;
+        let entry = zip.by_name(entry_name)?;
+        if entry.size() > MAX_ARCHIVE_ENTRY_BYTES {
+            anyhow::bail!(
+                "Archive entry '{}' exceeds max size ({} bytes)",
+                entry_name,
+                MAX_ARCHIVE_ENTRY_BYTES
+            );
+        }
+        let cap = (entry.size() as usize).min(16 * 1024 * 1024);
+        let mut buf = Vec::with_capacity(cap);
+        entry.take(MAX_ARCHIVE_ENTRY_BYTES + 1).read_to_end(&mut buf)?;
+        if buf.len() as u64 > MAX_ARCHIVE_ENTRY_BYTES {
+            anyhow::bail!(
+                "Archive entry '{}' exceeded max decompressed size ({} bytes)",
+                entry_name,
+                MAX_ARCHIVE_ENTRY_BYTES
+            );
+        }
         Ok(buf)
     }
 }

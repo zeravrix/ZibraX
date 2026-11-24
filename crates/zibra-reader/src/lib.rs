@@ -5,6 +5,7 @@ use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::net::{IpAddr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -72,6 +73,7 @@ pub struct ReaderPagePipeline {
     client: reqwest::Client,
     ram_cache: Cache<String, Arc<SlicedPage>>,
     disk_cache_dir: PathBuf,
+    allowed_local_roots: Vec<PathBuf>,
     in_flight: Arc<Mutex<HashSet<String>>>,
     failed_urls: Arc<Mutex<HashMap<String, (String, Instant)>>>,
     decode_semaphore: Arc<tokio::sync::Semaphore>,
@@ -79,6 +81,17 @@ pub struct ReaderPagePipeline {
 
 impl ReaderPagePipeline {
     pub fn new(app_dir: &Path, ram_budget_mb: usize) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(12))
+            .cookie_store(true)
+            .user_agent(DEFAULT_USER_AGENT)
+            .build()
+            .unwrap_or_default();
+        Self::new_with_client(app_dir, ram_budget_mb, client)
+    }
+
+    pub fn new_with_client(app_dir: &Path, ram_budget_mb: usize, client: reqwest::Client) -> Self {
         let disk_cache_dir = app_dir.join("cache").join("pages");
         let _ = fs::create_dir_all(&disk_cache_dir);
 
@@ -89,18 +102,11 @@ impl ReaderPagePipeline {
             .time_to_idle(Duration::from_secs(900))
             .build();
 
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .connect_timeout(Duration::from_secs(12))
-            .cookie_store(true)
-            .user_agent(DEFAULT_USER_AGENT)
-            .build()
-            .unwrap_or_default();
-
         Self {
             client,
             ram_cache,
             disk_cache_dir,
+            allowed_local_roots: default_allowed_roots(app_dir),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
             failed_urls: Arc::new(Mutex::new(HashMap::new())),
             decode_semaphore: Arc::new(tokio::sync::Semaphore::new(3)),
@@ -231,7 +237,15 @@ impl ReaderPagePipeline {
         Ok(arc_sliced)
     }
 
-    async fn fetch_raw_bytes(&self, page: &MangaPage) -> anyhow::Result<Vec<u8>> {
+    pub async fn fetch_raw_bytes(&self, page: &MangaPage) -> anyhow::Result<Vec<u8>> {
+        self.fetch_raw_bytes_with_policy(page, false).await
+    }
+
+    pub async fn fetch_raw_bytes_with_policy(
+        &self,
+        page: &MangaPage,
+        allow_private: bool,
+    ) -> anyhow::Result<Vec<u8>> {
         let url_trimmed = page.image_url.trim();
         if url_trimmed.is_empty() {
             anyhow::bail!("Empty page image URL");
@@ -239,36 +253,39 @@ impl ReaderPagePipeline {
 
         // 1. Offline CBZ archive entry: cbz://<archive_path>!<entry_name>
         if let Some(rest) = url_trimmed.strip_prefix("cbz://") {
-            if let Some((arch_str, entry_name)) = rest.split_once('!') {
-                let archive_path = PathBuf::from(arch_str);
-                let entry = entry_name.to_string();
-                return tokio::task::spawn_blocking(move || {
-                    ChapterArchive::read_entry(&archive_path, &entry)
-                })
-                .await?;
-            }
+            let Some((arch_str, entry_name)) = rest.split_once('!') else {
+                anyhow::bail!("Invalid cbz URI");
+            };
+            let canonical_archive =
+                validate_local_media_path(Path::new(arch_str), &self.allowed_local_roots)?;
+            let entry = entry_name.to_string();
+            return tokio::task::spawn_blocking(move || {
+                ChapterArchive::read_entry(&canonical_archive, &entry)
+            })
+            .await?;
         }
 
-        // 2. Local file:// URI or direct filesystem path
+        // 2. Local file:// URI or direct filesystem path within allowed roots
         if let Some(path_str) = url_trimmed.strip_prefix("file://") {
-            let p = PathBuf::from(path_str);
-            if p.is_file() {
-                return Ok(fs::read(&p)?);
-            }
+            let p = validate_local_media_path(Path::new(path_str), &self.allowed_local_roots)?;
+            return read_bounded_local_file(&p);
         }
         if !url_trimmed.starts_with("http://") && !url_trimmed.starts_with("https://") {
-            let p = PathBuf::from(url_trimmed);
-            if p.is_file() {
-                return Ok(fs::read(&p)?);
+            if url_trimmed.contains("://") {
+                anyhow::bail!("Unsupported URL scheme in page URL");
             }
+            let p = validate_local_media_path(Path::new(url_trimmed), &self.allowed_local_roots)?;
+            return read_bounded_local_file(&p);
         }
+
+        validate_remote_media_url(url_trimmed, allow_private)?;
 
         // 3. On-disk cache lookup
         let key_hash = hex::encode(Sha256::digest(url_trimmed.as_bytes()));
         let disk_file = self.disk_cache_dir.join(format!("{}.bin", key_hash));
 
         if disk_file.is_file() {
-            if let Ok(bytes) = fs::read(&disk_file) {
+            if let Ok(bytes) = read_bounded_local_file(&disk_file) {
                 if bytes.len() > 64 && !is_html_or_challenge(&bytes) {
                     return Ok(bytes);
                 }
@@ -312,25 +329,42 @@ impl ReaderPagePipeline {
             }
 
             match req.send().await {
-                Ok(resp) if resp.status().is_success() => match resp.bytes().await {
-                    Ok(b) if b.len() > 64 && !is_html_or_challenge(&b) => {
-                        let vec_b = b.to_vec();
-                        let tmp_file = self.disk_cache_dir.join(format!("{}.bin.part", key_hash));
-                        if fs::write(&tmp_file, &vec_b).is_ok() {
-                            let _ = fs::rename(&tmp_file, &disk_file);
+                Ok(resp) if resp.status().is_success() => {
+                    if let Some(cl) = resp.content_length() {
+                        if cl > MAX_SAFE_IMAGE_BYTES {
+                            anyhow::bail!("Image response {} exceeds size guard", cl);
                         }
-                        return Ok(vec_b);
                     }
-                    Ok(b) if is_html_or_challenge(&b) => {
-                        last_err = anyhow::anyhow!("Cloudflare/HTML challenge returned for {}", url_trimmed);
+                    match resp.bytes().await {
+                        Ok(b) if b.len() as u64 > MAX_SAFE_IMAGE_BYTES => {
+                            last_err = anyhow::anyhow!("Image response exceeds memory guard");
+                        }
+                        Ok(b) if b.len() > 64 && !is_html_or_challenge(&b) => {
+                            let vec_b = b.to_vec();
+                            write_cache_atomic(
+                                self.disk_cache_dir.join(format!("{}.bin.part", key_hash)),
+                                disk_file.clone(),
+                                vec_b.clone(),
+                            );
+                            return Ok(vec_b);
+                        }
+                        Ok(b) if is_html_or_challenge(&b) => {
+                            last_err = anyhow::anyhow!(
+                                "Cloudflare/HTML challenge returned for {}",
+                                url_trimmed
+                            );
+                        }
+                        Ok(_) => {
+                            last_err = anyhow::anyhow!(
+                                "Empty or truncated image response for {}",
+                                url_trimmed
+                            );
+                        }
+                        Err(e) => {
+                            last_err = e.into();
+                        }
                     }
-                    Ok(_) => {
-                        last_err = anyhow::anyhow!("Empty or truncated image response for {}", url_trimmed);
-                    }
-                    Err(e) => {
-                        last_err = e.into();
-                    }
-                },
+                }
                 Ok(resp) => {
                     last_err = anyhow::anyhow!("HTTP {} fetching page {}", resp.status(), url_trimmed);
                 }
@@ -370,6 +404,7 @@ pub struct CoverImageCache {
     client: reqwest::Client,
     ram_cache: Cache<String, Arc<DecodedCover>>,
     disk_cache_dir: PathBuf,
+    allowed_local_roots: Vec<PathBuf>,
     in_flight: Arc<Mutex<HashSet<String>>>,
     failed_urls: Arc<Mutex<HashMap<String, Instant>>>,
     fetch_semaphore: Arc<tokio::sync::Semaphore>,
@@ -377,6 +412,17 @@ pub struct CoverImageCache {
 
 impl CoverImageCache {
     pub fn new(app_dir: &Path) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(18))
+            .connect_timeout(Duration::from_secs(10))
+            .cookie_store(true)
+            .user_agent(DEFAULT_USER_AGENT)
+            .build()
+            .unwrap_or_default();
+        Self::new_with_client(app_dir, client)
+    }
+
+    pub fn new_with_client(app_dir: &Path, client: reqwest::Client) -> Self {
         let disk_cache_dir = app_dir.join("cache").join("covers");
         let _ = fs::create_dir_all(&disk_cache_dir);
 
@@ -387,18 +433,11 @@ impl CoverImageCache {
             .time_to_idle(Duration::from_secs(1800))
             .build();
 
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(18))
-            .connect_timeout(Duration::from_secs(10))
-            .cookie_store(true)
-            .user_agent(DEFAULT_USER_AGENT)
-            .build()
-            .unwrap_or_default();
-
         Self {
             client,
             ram_cache,
             disk_cache_dir,
+            allowed_local_roots: default_allowed_roots(app_dir),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
             failed_urls: Arc::new(Mutex::new(HashMap::new())),
             fetch_semaphore: Arc::new(tokio::sync::Semaphore::new(8)),
@@ -495,39 +534,68 @@ impl CoverImageCache {
         Ok(arc_cov)
     }
 
-    async fn fetch_cover_bytes(&self, url: &str) -> anyhow::Result<Vec<u8>> {
+    pub async fn fetch_cover_bytes(&self, url: &str) -> anyhow::Result<Vec<u8>> {
+        self.fetch_cover_bytes_with_policy(url, false).await
+    }
+
+    pub async fn fetch_cover_bytes_with_policy(
+        &self,
+        url: &str,
+        allow_private: bool,
+    ) -> anyhow::Result<Vec<u8>> {
+        let url = url.trim();
+        if url.is_empty() {
+            anyhow::bail!("Empty cover URL");
+        }
+        if let Some(rest) = url.strip_prefix("cbz://") {
+            let Some((arch_str, entry_name)) = rest.split_once('!') else {
+                anyhow::bail!("Invalid cbz cover URI");
+            };
+            let canonical_archive =
+                validate_local_media_path(Path::new(arch_str), &self.allowed_local_roots)?;
+            let entry = entry_name.to_string();
+            return tokio::task::spawn_blocking(move || {
+                ChapterArchive::read_entry(&canonical_archive, &entry)
+            })
+            .await?;
+        }
         if let Some(path_str) = url.strip_prefix("file://") {
-            let p = PathBuf::from(path_str);
-            if p.is_file() {
-                return Ok(fs::read(&p)?);
-            }
+            let p = validate_local_media_path(Path::new(path_str), &self.allowed_local_roots)?;
+            return read_bounded_local_file(&p);
         }
         if !url.starts_with("http://") && !url.starts_with("https://") {
-            let p = PathBuf::from(url);
-            if p.is_file() {
-                return Ok(fs::read(&p)?);
+            if url.contains("://") {
+                anyhow::bail!("Unsupported URL scheme in cover URL");
             }
+            let p = validate_local_media_path(Path::new(url), &self.allowed_local_roots)?;
+            return read_bounded_local_file(&p);
         }
+
+        validate_remote_media_url(url, allow_private)?;
 
         let key_hash = hex::encode(Sha256::digest(url.as_bytes()));
         let disk_file = self.disk_cache_dir.join(format!("{}.cov", key_hash));
 
         if disk_file.is_file() {
-            if let Ok(bytes) = fs::read(&disk_file) {
+            if let Ok(bytes) = read_bounded_local_file(&disk_file) {
                 if bytes.len() > 32 && !is_html_or_challenge(&bytes) {
                     return Ok(bytes);
                 }
             }
         }
 
-        let origin_ref = extract_origin_referer(url).unwrap_or_else(|| "https://mangadex.org/".to_string());
+        let origin_ref =
+            extract_origin_referer(url).unwrap_or_else(|| "https://mangadex.org/".to_string());
         let candidates = [Some(origin_ref), None];
 
         for ref_opt in candidates {
             let mut req = self
                 .client
                 .get(url)
-                .header("Accept", "image/webp,image/png,image/jpeg,image/gif,image/x-icon,image/*,*/*;q=0.8")
+                .header(
+                    "Accept",
+                    "image/webp,image/png,image/jpeg,image/gif,image/x-icon,image/*,*/*;q=0.8",
+                )
                 .header("Accept-Language", "en-US,en;q=0.9,ar;q=0.8");
             if let Some(ref r) = ref_opt {
                 req = req.header("Referer", r);
@@ -535,13 +603,22 @@ impl CoverImageCache {
 
             if let Ok(resp) = req.send().await {
                 if resp.status().is_success() {
+                    if let Some(cl) = resp.content_length() {
+                        if cl > MAX_SAFE_IMAGE_BYTES {
+                            continue;
+                        }
+                    }
                     if let Ok(bytes) = resp.bytes().await {
-                        if bytes.len() > 32 && !is_html_or_challenge(&bytes) {
+                        if (bytes.len() as u64) <= MAX_SAFE_IMAGE_BYTES
+                            && bytes.len() > 32
+                            && !is_html_or_challenge(&bytes)
+                        {
                             let vec_b = bytes.to_vec();
-                            let tmp = self.disk_cache_dir.join(format!("{}.cov.part", key_hash));
-                            if fs::write(&tmp, &vec_b).is_ok() {
-                                let _ = fs::rename(&tmp, &disk_file);
-                            }
+                            write_cache_atomic(
+                                self.disk_cache_dir.join(format!("{}.cov.part", key_hash)),
+                                disk_file.clone(),
+                                vec_b.clone(),
+                            );
                             return Ok(vec_b);
                         }
                     }
@@ -551,6 +628,115 @@ impl CoverImageCache {
 
         anyhow::bail!("Failed to fetch cover image from {}", url)
     }
+}
+
+fn default_allowed_roots(app_dir: &Path) -> Vec<PathBuf> {
+    let mut roots = vec![
+        app_dir.join("downloads"),
+        app_dir.join("local-library"),
+        app_dir.join("cache"),
+    ];
+    for var in ["HOME", "USERPROFILE"] {
+        if let Ok(home) = std::env::var(var) {
+            let h = PathBuf::from(home);
+            roots.push(h.join(".zibra").join("downloads"));
+            roots.push(h.join(".zibra").join("local-library"));
+            roots.push(h.join(".zeravrix").join("downloads"));
+            roots.push(h.join(".zeravrix").join("local-library"));
+        }
+    }
+    roots
+}
+
+fn validate_local_media_path(path: &Path, allowed_roots: &[PathBuf]) -> anyhow::Result<PathBuf> {
+    let canon_path = fs::canonicalize(path)
+        .map_err(|_| anyhow::anyhow!("Local media path does not exist"))?;
+    for root in allowed_roots {
+        if let Ok(canon_root) = fs::canonicalize(root) {
+            if canon_path.starts_with(&canon_root) {
+                return Ok(canon_path);
+            }
+        }
+    }
+    anyhow::bail!("Access denied: local media path outside allowlisted directories")
+}
+
+fn read_bounded_local_file(path: &Path) -> anyhow::Result<Vec<u8>> {
+    let meta = fs::metadata(path)?;
+    if meta.len() > MAX_SAFE_IMAGE_BYTES {
+        anyhow::bail!("Local media file exceeds maximum allowed size");
+    }
+    Ok(fs::read(path)?)
+}
+
+fn write_cache_atomic(tmp: PathBuf, dst: PathBuf, bytes: Vec<u8>) {
+    tokio::task::spawn_blocking(move || {
+        if fs::write(&tmp, &bytes).is_ok() {
+            let _ = fs::rename(&tmp, &dst);
+        }
+    });
+}
+
+fn is_disallowed_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || (o[0] == 100 && (o[1] & 0b1100_0000) == 64)
+        }
+        IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_disallowed_ip(IpAddr::V4(mapped));
+            }
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || is_ipv6_ula_or_link_local(v6)
+        }
+    }
+}
+
+fn is_ipv6_ula_or_link_local(v6: Ipv6Addr) -> bool {
+    let seg0 = v6.segments()[0];
+    (seg0 & 0xfe00) == 0xfc00 || (seg0 & 0xffc0) == 0xfe80
+}
+
+pub fn validate_remote_media_url(raw_url: &str, allow_private: bool) -> anyhow::Result<reqwest::Url> {
+    let parsed = reqwest::Url::parse(raw_url.trim())
+        .map_err(|_| anyhow::anyhow!("Invalid media URL"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        anyhow::bail!("Unsupported media URL scheme: {}", parsed.scheme());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        anyhow::bail!("Embedded credentials are not allowed in media URLs");
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing host in media URL"))?
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+
+    if !allow_private {
+        if host == "localhost"
+            || host.ends_with(".localhost")
+            || host.ends_with(".local")
+            || host.ends_with(".internal")
+        {
+            anyhow::bail!("Private/local host blocked: {}", host);
+        }
+        let host_unbracketed = host.trim_start_matches('[').trim_end_matches(']');
+        if let Ok(ip) = host_unbracketed.parse::<IpAddr>() {
+            if is_disallowed_ip(ip) {
+                anyhow::bail!("Private/loopback IP blocked: {}", ip);
+            }
+        }
+    }
+    Ok(parsed)
 }
 
 fn extract_origin_referer(url: &str) -> Option<String> {

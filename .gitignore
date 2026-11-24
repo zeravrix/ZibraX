@@ -4,3 +4,5 @@
 .zibra/
 .DS_Store
 node_modules/
+graphify-out/
+ZibraX-main.zip

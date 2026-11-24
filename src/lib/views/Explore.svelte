@@ -5,7 +5,7 @@
   import CoverGrid from '../components/CoverGrid.svelte';
   import EmptyState from '../components/EmptyState.svelte';
   import ContextMenu from '../components/ContextMenu.svelte';
-  import { appState, notify } from '../stores/app.svelte.js';
+  import { appState, notify, updateSettings, mediaUrl } from '../stores/app.svelte.js';
   import { 
     Compass, Globe, Flame, Clock, ShieldAlert, 
     Search, ArrowLeft, Star, ExternalLink, RefreshCw,
@@ -47,25 +47,24 @@
 
   const languages = ['ALL', 'en', 'ar', 'es', 'fr', 'id', 'ru', 'ja', 'ko', 'pt', 'tr', 'vi', 'de', 'it'];
 
-  // Load pinned sources from localStorage
+  const DEFAULT_PINNED_IDS = ['MANGADEX', 'HIJALA', 'ASURASCANS', 'FLAMESCANS', 'MANGASWAT', 'TOONILY'];
+
   function loadPinnedIds() {
-    try {
-      const saved = localStorage.getItem('zibra_pinned_sources');
-      if (saved) {
-        pinnedSourceIds = JSON.parse(saved);
-      } else {
-        pinnedSourceIds = ['MANGADEX', 'HIJALA', 'MANGAKAKALOT', 'ASURASCANS', 'FLAMECOMICS', 'MANGASWAT'];
-        savePinnedIds();
-      }
-    } catch (_) {
-      pinnedSourceIds = ['MANGADEX', 'HIJALA', 'MANGAKAKALOT', 'ASURASCANS'];
+    const saved = appState.settings?.pinned_source_ids;
+    if (Array.isArray(saved) && saved.length > 0) {
+      pinnedSourceIds = [...saved];
+    } else {
+      pinnedSourceIds = [...DEFAULT_PINNED_IDS];
     }
   }
 
   function savePinnedIds() {
-    try {
-      localStorage.setItem('zibra_pinned_sources', JSON.stringify(pinnedSourceIds));
-    } catch (_) {}
+    if (appState.settings) {
+      updateSettings({
+        ...appState.settings,
+        pinned_source_ids: [...pinnedSourceIds],
+      });
+    }
   }
 
   function togglePin(sourceId, e) {
@@ -447,13 +446,16 @@
         {#each pinnedSources as source (source.id)}
           <div
             class="source-card"
+            role="button"
+            tabindex="0"
             on:click={() => openSourceBrowser(source)}
+            on:keydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), openSourceBrowser(source))}
             on:contextmenu={(e) => handleSourceContextMenu(e, source)}
           >
             <div class="card-top">
               <div class="source-icon-wrap">
                 {#if source.icon_url}
-                  <img src={source.icon_url} alt="" class="source-favicon" loading="lazy" decoding="async" on:error={(e) => e.target.style.display = 'none'} />
+                  <img src={mediaUrl(source.icon_url, null, 'cover')} alt="" class="source-favicon" loading="lazy" decoding="async" on:error={(e) => e.target.style.display = 'none'} />
                 {:else}
                   <Globe size={24} class="source-fallback-icon" />
                 {/if}
@@ -536,13 +538,16 @@
         {#each filteredCatalogSources.slice(0, catalogDisplayLimit) as source (source.id)}
           <div
             class="source-card"
+            role="button"
+            tabindex="0"
             on:click={() => openSourceBrowser(source)}
+            on:keydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), openSourceBrowser(source))}
             on:contextmenu={(e) => handleSourceContextMenu(e, source)}
           >
             <div class="card-top">
               <div class="source-icon-wrap">
                 {#if source.icon_url}
-                  <img src={source.icon_url} alt="" class="source-favicon" loading="lazy" decoding="async" on:error={(e) => e.target.style.display = 'none'} />
+                  <img src={mediaUrl(source.icon_url, null, 'cover')} alt="" class="source-favicon" loading="lazy" decoding="async" on:error={(e) => e.target.style.display = 'none'} />
                 {:else}
                   <Globe size={24} class="source-fallback-icon" />
                 {/if}
@@ -591,7 +596,7 @@
         <div class="source-meta-block">
           <div class="source-icon-mini">
             {#if selectedSource?.icon_url}
-              <img src={selectedSource.icon_url} alt="" class="mini-favicon" on:error={(e) => e.target.style.display = 'none'} />
+              <img src={mediaUrl(selectedSource.icon_url, null, 'cover')} alt="" class="mini-favicon" on:error={(e) => e.target.style.display = 'none'} />
             {:else}
               <Globe size={18} />
             {/if}
@@ -898,17 +903,7 @@
   }
 
   :global(.brand-icon) {
-    color: #3b82f6;
-  }
-
-  .count-pill {
-    font-size: 11px;
-    font-weight: 700;
-    background: rgba(59, 130, 246, 0.15);
-    color: #60a5fa;
-    border: 1px solid rgba(59, 130, 246, 0.3);
-    padding: 3px 10px;
-    border-radius: var(--z-radius-full);
+    color: var(--z-accent);
   }
 
   .search-wrap {
@@ -986,23 +981,23 @@
   }
 
   .source-card {
-    background: rgba(18, 18, 26, 0.75);
-    backdrop-filter: blur(14px);
-    -webkit-backdrop-filter: blur(14px);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: var(--z-surface);
+    border: 1px solid var(--z-border);
     border-radius: var(--z-radius-lg);
     padding: var(--z-space-4);
     display: flex;
     flex-direction: column;
     cursor: pointer;
-    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.1);
-    transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    box-shadow: var(--z-shadow-card);
+    transition: transform var(--z-duration-normal) var(--z-ease-spring),
+                border-color var(--z-duration-fast) var(--z-ease-out),
+                box-shadow var(--z-duration-normal) var(--z-ease-out);
   }
 
   .source-card:hover {
     transform: translateY(-4px);
-    border-color: rgba(59, 130, 246, 0.5);
-    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.7), 0 0 24px rgba(59, 130, 246, 0.25);
+    border-color: var(--z-accent);
+    box-shadow: var(--z-shadow-card-hover);
   }
 
   .load-more-manual-wrap {

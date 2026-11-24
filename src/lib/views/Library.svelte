@@ -1,21 +1,60 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import CoverGrid from '../components/CoverGrid.svelte';
   import SearchBar from '../components/SearchBar.svelte';
   import EmptyState from '../components/EmptyState.svelte';
-  import { appState, notify, openReader, navigate } from '../stores/app.svelte.js';
-  import { Heart, History, Trash2, Rss, Download, BookOpen } from 'lucide-svelte';
+  import { appState, notify, openReader, navigate, mediaUrl } from '../stores/app.svelte.js';
+  import { Heart, History, Trash2, Rss, Download, BookOpen, X } from 'lucide-svelte';
 
   export let mode = 'history'; // 'history' | 'favorites' | 'feed' | 'downloads'
 
   let mangas = [];
   let feedItems = [];
+  let downloadItems = [];
   let loading = true;
   let searchQuery = '';
   let activeFilter = 'ALL'; // 'ALL' | 'READING' | 'COMPLETED'
   let progressMap = {};
   let favoritesSet = new Set();
+  let dlPollTimer = null;
+
+  async function mapConcurrent(items, limit, worker) {
+    const out = [];
+    let cursor = 0;
+    const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (cursor < items.length) {
+        const idx = cursor++;
+        const res = await worker(items[idx]);
+        if (res) out.push(res);
+      }
+    });
+    await Promise.all(runners);
+    return out;
+  }
+
+  async function refreshDownloadsOnly() {
+    try {
+      const dls = await invoke('get_downloads');
+      downloadItems = dls;
+      const seen = new Map();
+      for (const d of dls) {
+        if (!seen.has(d.manga_id)) {
+          seen.set(d.manga_id, {
+            id: d.manga_id,
+            title: d.manga_title || 'Downloaded Title',
+            cover_url: d.cover_url || '',
+            source_id: d.source_id,
+            url: ''
+          });
+        }
+      }
+      mangas = Array.from(seen.values());
+    } catch (_) {
+      downloadItems = [];
+      mangas = [];
+    }
+  }
 
   async function loadLibraryData() {
     loading = true;
@@ -27,45 +66,31 @@
         mangas = favs;
       } else if (mode === 'feed') {
         mangas = favs;
-        const items = [];
-        for (const m of favs.slice(0, 20)) {
+        feedItems = await mapConcurrent(favs.slice(0, 20), 4, async (m) => {
           try {
             const chs = await invoke('get_chapters', { sourceId: m.source_id, manga: m });
             if (chs && chs.length > 0) {
-              items.push({ manga: m, chapter: chs[0] });
+              return { manga: m, chapter: chs[0] };
             }
           } catch (_) {}
-        }
-        feedItems = items;
+          return null;
+        });
       } else if (mode === 'downloads') {
-        try {
-          const dls = await invoke('get_downloads');
-          mangas = dls.map(d => ({
-            id: d.manga_id,
-            title: d.manga_title || 'Downloaded Title',
-            cover_url: d.cover_url || '',
-            source_id: d.source_id,
-            url: ''
-          }));
-        } catch (_) {
-          mangas = [];
-        }
+        await refreshDownloadsOnly();
       } else {
         mangas = await invoke('get_history');
       }
 
       // Load progress for each manga
       const pMap = {};
-      await Promise.all(
-        mangas.map(async m => {
-          try {
-            const p = await invoke('get_reading_progress', { mangaId: m.id });
-            if (p && p.total_pages > 0) {
-              pMap[m.id] = p.page_index / p.total_pages;
-            }
-          } catch (_) {}
-        })
-      );
+      await mapConcurrent(mangas, 8, async (m) => {
+        try {
+          const p = await invoke('get_reading_progress', { mangaId: m.id });
+          if (p && p.total_pages > 0) {
+            pMap[m.id] = p.page_index / p.total_pages;
+          }
+        } catch (_) {}
+      });
       progressMap = pMap;
     } catch (e) {
       console.error('Failed to load library:', e);
@@ -73,6 +98,47 @@
     } finally {
       loading = false;
     }
+  }
+
+  async function handleCancelDownload(chapterId) {
+    try {
+      await invoke('cancel_download', { chapterId });
+      await refreshDownloadsOnly();
+      notify('Download cancelled');
+    } catch (e) {
+      notify('Failed to cancel download: ' + e);
+    }
+  }
+
+  async function handleDeleteDownload(dl) {
+    if (!dl.archive_path) return;
+    try {
+      await invoke('delete_downloaded_chapter', { archivePath: dl.archive_path });
+      await refreshDownloadsOnly();
+      notify(`Deleted "${dl.chapter_title}"`);
+    } catch (e) {
+      notify('Failed to delete archive: ' + e);
+    }
+  }
+
+  function handleReadDownloaded(dl) {
+    const manga = {
+      id: dl.manga_id,
+      title: dl.manga_title,
+      cover_url: dl.cover_url || null,
+      source_id: dl.source_id,
+      description: '',
+      genres: [],
+      is_manhwa: true,
+    };
+    const chapter = {
+      id: dl.chapter_id,
+      manga_id: dl.manga_id,
+      title: dl.chapter_title,
+      source_id: dl.source_id,
+      is_locked: false,
+    };
+    openReader(manga, chapter, 0, [chapter]);
   }
 
   async function handleToggleFavorite(manga) {
@@ -132,7 +198,20 @@
 
   onMount(() => {
     loadLibraryData();
+    if (mode === 'downloads') {
+      dlPollTimer = setInterval(refreshDownloadsOnly, 1500);
+    }
   });
+
+  onDestroy(() => {
+    if (dlPollTimer) clearInterval(dlPollTimer);
+  });
+
+  $: filteredDownloads = downloadItems.filter(d =>
+    !searchQuery ||
+    d.manga_title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    d.chapter_title.toLowerCase().includes(searchQuery.toLowerCase())
+  );
 </script>
 
 <div class="library-view">
@@ -211,7 +290,7 @@
             >
               <div class="feed-thumb-wrap">
                 {#if item.manga.cover_url}
-                  <img src={item.manga.cover_url} alt="" class="feed-thumb" />
+                  <img src={mediaUrl(item.manga.cover_url, null, 'cover')} alt={item.manga.title} class="feed-thumb" />
                 {:else}
                   <div class="feed-thumb-fallback"><BookOpen size={16} /></div>
                 {/if}
@@ -224,6 +303,71 @@
                 </div>
               </div>
               <button class="feed-read-action" type="button">Read</button>
+            </div>
+          {/each}
+        </div>
+      {/if}
+    {:else if mode === 'downloads'}
+      {#if filteredDownloads.length === 0}
+        <EmptyState
+          title="No Downloads"
+          description="Download chapters from any manga details page to read them offline."
+          actionLabel="Explore Sources"
+          onAction={() => navigate('explore')}
+        />
+      {:else}
+        <div class="feed-list">
+          {#each filteredDownloads as dl (dl.chapter_id)}
+            <div class="feed-item">
+              <div class="feed-thumb-wrap">
+                {#if dl.cover_url}
+                  <img src={mediaUrl(dl.cover_url, null, 'cover')} alt={dl.manga_title} class="feed-thumb" />
+                {:else}
+                  <div class="feed-thumb-fallback"><BookOpen size={16} /></div>
+                {/if}
+              </div>
+              <div class="feed-info">
+                <span class="feed-manga-title">{dl.manga_title}</span>
+                <div class="feed-chapter-row">
+                  <span class="feed-ch-badge">{dl.chapter_title}</span>
+                  <span class="feed-source-tag">
+                    {dl.status}{#if dl.total_pages > 0} • {dl.downloaded_pages}/{dl.total_pages} pages{/if}
+                  </span>
+                </div>
+                {#if dl.status === 'Downloading' || dl.status === 'Queued'}
+                  <div class="dl-progress-track">
+                    <div class="dl-progress-fill" style="width: {Math.round(dl.progress * 100)}%"></div>
+                  </div>
+                {/if}
+              </div>
+              <div class="dl-actions">
+                {#if dl.status === 'Completed'}
+                  <button class="feed-read-action" type="button" on:click={() => handleReadDownloaded(dl)}>
+                    Read Offline
+                  </button>
+                  {#if dl.archive_path}
+                    <button
+                      class="dl-icon-btn danger"
+                      type="button"
+                      title="Delete archive"
+                      aria-label="Delete {dl.chapter_title}"
+                      on:click={() => handleDeleteDownload(dl)}
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  {/if}
+                {:else if dl.status === 'Downloading' || dl.status === 'Queued'}
+                  <button
+                    class="dl-icon-btn danger"
+                    type="button"
+                    title="Cancel download"
+                    aria-label="Cancel {dl.chapter_title}"
+                    on:click={() => handleCancelDownload(dl.chapter_id)}
+                  >
+                    <X size={15} />
+                  </button>
+                {/if}
+              </div>
             </div>
           {/each}
         </div>
@@ -485,5 +629,44 @@
 
   @keyframes spin {
     to { transform: rotate(360deg); }
+  }
+
+  .dl-progress-track {
+    width: 100%;
+    height: 4px;
+    border-radius: 9999px;
+    background: var(--z-surface-raised);
+    overflow: hidden;
+    margin-top: 4px;
+  }
+
+  .dl-progress-fill {
+    height: 100%;
+    background: var(--z-accent);
+    transition: width 0.2s ease;
+  }
+
+  .dl-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  .dl-icon-btn {
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    background: var(--z-surface-raised);
+    color: var(--z-text-muted);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s ease;
+  }
+
+  .dl-icon-btn.danger:hover {
+    background: rgba(239, 68, 68, 0.2);
+    color: #ef4444;
   }
 </style>

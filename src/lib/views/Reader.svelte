@@ -2,7 +2,7 @@
   import { onMount, onDestroy, tick } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
-  import { appState, goBack, notify, updateSettings, toChronologicalChapters } from '../stores/app.svelte.js';
+  import { appState, goBack, notify, updateSettings, toChronologicalChapters, mediaUrl } from '../stores/app.svelte.js';
   import {
     clampZoom,
     needsNextChapterFetch,
@@ -14,8 +14,21 @@
     BookOpen, Columns, AlignJustify
   } from 'lucide-svelte';
 
-  const PRELOAD_AHEAD = 3;
-  const SLOW_IMAGE_MS = 6000;
+  const SLOW_IMAGE_MS = 8000;
+
+  $: preloadAheadCount = Math.max(1, Math.min(10, Number(appState.settings?.preload_pages_ahead ?? 3)));
+  $: infiniteScrollEnabled = appState.settings?.infinite_chapter_scroll ?? true;
+  $: fitToWidth = appState.settings?.fit_to_width ?? true;
+
+  function pageMediaSrc(item) {
+    if (!item?.page?.image_url) return '';
+    return mediaUrl(
+      item.page.image_url,
+      item.page.referer || item.chapter?.url || item.chapter?.id || null,
+      'page',
+      item.page.headers || null,
+    );
+  }
 
   let manga = appState.activeManga;
   let chapter = appState.activeChapter;
@@ -53,6 +66,21 @@
 
   let scrollContainer;
   let draggingSlider = null;
+  const measuredHeights = new Map();
+
+  function captureHeight(node, key) {
+    return {
+      destroy() {
+        const h = node?.getBoundingClientRect?.().height;
+        if (h > 40) measuredHeights.set(key, Math.round(h));
+      }
+    };
+  }
+
+  $: activeChapterBlockIdx = activeFlatPage?.chapterBlockIdx ?? 0;
+  function isChapterInWindow(blockIdx) {
+    return blockIdx >= activeChapterBlockIdx - 1 && blockIdx <= activeChapterBlockIdx + 2;
+  }
 
   $: flatPages = (() => {
     const out = [];
@@ -165,7 +193,7 @@
 
   function pumpPageLoader() {
     if (flatPages.length === 0) return;
-    const effectiveAhead = readerMode === 'double' && !isCoverSpread ? PRELOAD_AHEAD + 1 : PRELOAD_AHEAD;
+    const effectiveAhead = readerMode === 'double' && !isCoverSpread ? preloadAheadCount + 1 : preloadAheadCount;
     const nextIdx = getNextSequentialPageToLoad(flatPages, pageStates, currentGlobalIdx, effectiveAhead);
     if (nextIdx === null) return;
 
@@ -201,7 +229,7 @@
         preloadImages.set(key, img);
         img.onload = () => markPageLoaded(key);
         img.onerror = () => markPageError(key);
-        img.src = item.page.image_url;
+        img.src = pageMediaSrc(item);
       }
     }
   }
@@ -258,8 +286,8 @@
       await tick();
       pumpPageLoader();
 
-      // Handle very short chapters (< 3 pages) by immediately chaining if still within 3 pages of end
-      if (needsNextChapterFetch(flatPages.length, currentGlobalIdx, PRELOAD_AHEAD, hasNextChapter)) {
+      // Handle very short chapters (< preloadAheadCount pages) by immediately chaining if still near end
+      if (infiniteScrollEnabled && needsNextChapterFetch(flatPages.length, currentGlobalIdx, preloadAheadCount, hasNextChapter)) {
         loadingNextChapter = false;
         return await loadNextChapter();
       }
@@ -274,8 +302,8 @@
   }
 
   function ensureAheadLoaded(globalIdx) {
-    if (loadingNextChapter || nextChapterError) return;
-    const effectiveAhead = readerMode === 'double' && !isCoverSpread ? PRELOAD_AHEAD + 1 : PRELOAD_AHEAD;
+    if (!infiniteScrollEnabled || loadingNextChapter || nextChapterError) return;
+    const effectiveAhead = readerMode === 'double' && !isCoverSpread ? preloadAheadCount + 1 : preloadAheadCount;
     if (needsNextChapterFetch(flatPages.length, globalIdx, effectiveAhead, hasNextChapter)) {
       loadNextChapter();
     }
@@ -307,13 +335,19 @@
 
       // Determine starting page: explicit initialPageIndex > saved progress for this chapter > Page 1 (0)
       let startIdx = 0;
+      let savedScrollY = 0;
       try {
         if (appState.initialPageIndex > 0 && appState.initialPageIndex < initialPages.length) {
           startIdx = appState.initialPageIndex;
         } else {
           const prog = await invoke('get_reading_progress', { mangaId: manga.id });
-          if (prog && prog.chapter_id === chapter.id && prog.page_index > 0 && prog.page_index < initialPages.length) {
-            startIdx = prog.page_index;
+          if (prog && prog.chapter_id === chapter.id) {
+            if (prog.page_index > 0 && prog.page_index < initialPages.length) {
+              startIdx = prog.page_index;
+            }
+            if (typeof prog.scroll_offset_y === 'number' && prog.scroll_offset_y > 0) {
+              savedScrollY = prog.scroll_offset_y;
+            }
           }
         }
       } catch (_) {}
@@ -323,10 +357,14 @@
 
       await tick();
       if (readerMode === 'webtoon' && scrollContainer) {
-        if (startIdx > 0) {
+        if (savedScrollY > 0 && startIdx === 0) {
+          scrollContainer.scrollTop = savedScrollY;
+        } else if (startIdx > 0) {
           const targetSlot = scrollContainer.querySelector(`[data-global-index="${startIdx}"]`);
           if (targetSlot) {
             targetSlot.scrollIntoView({ behavior: 'auto' });
+          } else if (savedScrollY > 0) {
+            scrollContainer.scrollTop = savedScrollY;
           }
         } else {
           scrollContainer.scrollTop = 0;
@@ -548,7 +586,7 @@
     // Fallback trigger near scroll bottom so endless chapter loading never misses
     const distFromBottom =
       scrollContainer.scrollHeight - (scrollContainer.scrollTop + scrollContainer.clientHeight);
-    if (distFromBottom < 1200 && hasNextChapter && !loadingNextChapter && !nextChapterError) {
+    if (infiniteScrollEnabled && distFromBottom < 1200 && hasNextChapter && !loadingNextChapter && !nextChapterError) {
       loadNextChapter();
     }
   }
@@ -574,7 +612,8 @@
         manga_id: manga.id,
         chapter_id: ch.id,
         page_index: entry.pageIdx,
-        scroll_offset_y: 0.0,
+        total_pages: entry.chapterTotalPages || null,
+        scroll_offset_y: readerMode === 'webtoon' && scrollContainer ? scrollContainer.scrollTop : 0.0,
         chapter_number: ch.number ?? 0.0,
         updated_at: Date.now(),
       },
@@ -653,6 +692,7 @@
       const rm = appState.settings.reader_mode.toLowerCase();
       if (rm.includes('double')) readerMode = 'double';
       else if (rm.includes('single')) readerMode = 'single';
+      else if (rm === 'auto') readerMode = manga?.is_manhwa ? 'webtoon' : 'single';
       else readerMode = 'webtoon';
     }
     if (appState.settings?.reading_direction) {
@@ -692,11 +732,13 @@
   class="reader-container"
   class:invert={invertColors}
   on:click={toggleHud}
+  on:keydown={(e) => { if (e.key === 'h' || e.key === 'H') toggleHud(); }}
   role="region"
+  tabindex="-1"
   aria-label="Manga Reader"
 >
   <!-- TOP HUD BAR -->
-  <header class="hud-top" class:visible={showHud} on:click|stopPropagation>
+  <header class="hud-top" class:visible={showHud} role="toolbar" tabindex="-1" on:click|stopPropagation on:keydown|stopPropagation>
     <div class="hud-left">
       <button class="hud-btn" on:click={goBack} title="Back">
         <ArrowLeft size={18} strokeWidth={2} />
@@ -786,7 +828,7 @@
         <p>Loading chapter pages...</p>
       </div>
     {:else if loadError || flatPages.length === 0}
-      <div class="reader-error-state" on:click|stopPropagation>
+      <div class="reader-error-state" role="alert" on:click|stopPropagation on:keydown|stopPropagation>
         <ShieldAlert size={40} class="cf-alert-icon" />
         <h2>Unable to load chapter images</h2>
         <p class="error-msg">{loadError || 'Empty page list returned.'}</p>
@@ -811,7 +853,7 @@
       <!-- Endless Vertical Webtoon Strip Across All Chapters -->
       <div
         class="webtoon-strip"
-        style="width: calc(min(820px, 100vw) * var(--zoom, 1)); row-gap: {pageGap}px; filter: contrast({contrast}%) brightness({brightness}%);"
+        style="width: {fitToWidth ? 'calc(min(820px, 100vw) * var(--zoom, 1))' : 'fit-content'}; max-width: calc(100vw * var(--zoom, 1)); row-gap: {pageGap}px; filter: contrast({contrast}%) brightness({brightness}%);"
       >
         {#each flatPages as item (item.key)}
           {#if item.pageIdx === 0 && item.chapterBlockIdx > 0}
@@ -828,10 +870,16 @@
             data-global-index={item.globalIdx}
             data-chapter-index={item.chapterBlockIdx}
             data-page-index={item.pageIdx}
+            use:captureHeight={item.key}
+            style={!isChapterInWindow(item.chapterBlockIdx) ? `min-height: ${measuredHeights.get(item.key) || 520}px;` : undefined}
           >
-            {#if pageStates[item.key] === 'loading' || pageStates[item.key] === 'loaded' || pageStates[item.key] === 'slow'}
+            {#if !isChapterInWindow(item.chapterBlockIdx)}
+              <div class="page-placeholder" style="min-height: {measuredHeights.get(item.key) || 520}px;">
+                <span>Page {item.pageIdx + 1}</span>
+              </div>
+            {:else if pageStates[item.key] === 'loading' || pageStates[item.key] === 'loaded' || pageStates[item.key] === 'slow'}
               <img
-                src={item.page.image_url}
+                src={pageMediaSrc(item)}
                 alt="Page {item.pageIdx + 1}"
                 decoding="async"
                 class="reader-page-img"
@@ -846,13 +894,17 @@
                 </div>
               {/if}
             {:else if pageStates[item.key] === 'error'}
-              <div class="page-error-box" on:click|stopPropagation={() => retryPage(item.key)}>
+              <button
+                type="button"
+                class="page-error-box"
+                on:click|stopPropagation={() => retryPage(item.key)}
+              >
                 <span>Page {item.pageIdx + 1} failed to load</span>
-                <button class="page-retry-btn" type="button">
+                <span class="page-retry-btn">
                   <RotateCcw size={13} />
                   Retry
-                </button>
-              </div>
+                </span>
+              </button>
             {:else}
               <div class="page-placeholder">
                 <span>Page {item.pageIdx + 1}</span>
@@ -868,7 +920,7 @@
             <span>Loading {nextChapterObj?.title || 'next chapter'}...</span>
           </div>
         {:else if nextChapterError}
-          <div class="chapter-end-card" on:click|stopPropagation>
+          <div class="chapter-end-card" role="region" tabindex="-1" on:click|stopPropagation on:keydown|stopPropagation>
             <span class="end-badge error">CHAPTER LOAD ERROR</span>
             <p class="end-title">{nextChapterObj?.title || 'Next Chapter'}</p>
             <p class="next-err-text">{nextChapterError}</p>
@@ -882,7 +934,7 @@
             </div>
           </div>
         {:else if !hasNextChapter}
-          <div class="chapter-end-card" on:click|stopPropagation>
+          <div class="chapter-end-card" role="region" tabindex="-1" on:click|stopPropagation on:keydown|stopPropagation>
             <span class="end-badge">LATEST CHAPTER REACHED</span>
             <p class="end-title">{activeChapter?.title || 'All available chapters completed'}</p>
             <div class="end-actions">
@@ -901,7 +953,7 @@
         <div class="double-page-row" class:single-cover={isCoverSpread}>
           {#each spreadEntries as entry (entry.key)}
             <img
-              src={entry.page.image_url}
+              src={pageMediaSrc(entry)}
               alt="Page {entry.pageIdx + 1}"
               class="reader-spread-img"
               use:trackCachedLoad={entry.key}
@@ -921,7 +973,7 @@
         {#if activeFlatPage}
           {#key activeFlatPage.key}
             <img
-              src={activeFlatPage.page.image_url}
+              src={pageMediaSrc(activeFlatPage)}
               alt="Page {activeFlatPage.pageIdx + 1}"
               class="reader-single-img"
               use:trackCachedLoad={activeFlatPage.key}
@@ -936,7 +988,7 @@
 
   <!-- READER SETTINGS DRAWER (TAB KEY) -->
   {#if showSettings}
-    <div class="settings-drawer" on:click|stopPropagation role="dialog" aria-label="Reader Settings">
+    <div class="settings-drawer" on:click|stopPropagation on:keydown|stopPropagation role="dialog" tabindex="-1" aria-label="Reader Settings">
       <div class="drawer-header">
         <div class="drawer-title-row">
           <Sliders size={16} class="drawer-icon" />
@@ -1139,7 +1191,7 @@
     position: fixed;
     left: 0;
     right: 0;
-    background: rgba(35, 33, 44, 0.90);
+    background: var(--z-surface-overlay);
     backdrop-filter: blur(16px);
     padding: var(--z-space-3) var(--z-space-6);
     color: var(--z-text);
@@ -1605,7 +1657,7 @@
     top: 64px;
     right: 20px;
     width: 320px;
-    background: rgba(35, 33, 44, 0.96);
+    background: var(--z-surface-overlay);
     backdrop-filter: blur(20px);
     border: 1px solid var(--z-border);
     border-radius: var(--z-radius-lg);

@@ -1,12 +1,15 @@
 use crate::archive::{ArchiveImage, ChapterArchive};
 use crate::models::{Chapter, DownloadedChapter, Manga, MangaPage};
 use chrono::Utc;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
+
+const MAX_FINISHED_JOBS: usize = 40;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DownloadStatus {
@@ -28,13 +31,12 @@ pub struct DesktopDownloader {
     downloads_dir: PathBuf,
     client: reqwest::Client,
     jobs: Arc<RwLock<Vec<DownloadJobState>>>,
+    abort_handles: Arc<Mutex<HashMap<String, Vec<tokio::task::AbortHandle>>>>,
     semaphore: Arc<Semaphore>,
 }
 
 impl DesktopDownloader {
     pub fn new(app_dir: &Path, max_concurrent: usize) -> Self {
-        let downloads_dir = app_dir.join("downloads");
-        let _ = fs::create_dir_all(&downloads_dir);
         #[cfg(target_os = "linux")]
         let ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
         #[cfg(not(target_os = "linux"))]
@@ -46,10 +48,18 @@ impl DesktopDownloader {
             .build()
             .unwrap_or_default();
 
+        Self::new_with_client(app_dir, max_concurrent, client)
+    }
+
+    pub fn new_with_client(app_dir: &Path, max_concurrent: usize, client: reqwest::Client) -> Self {
+        let downloads_dir = app_dir.join("downloads");
+        let _ = fs::create_dir_all(&downloads_dir);
+
         Self {
             downloads_dir,
             client,
             jobs: Arc::new(RwLock::new(Vec::new())),
+            abort_handles: Arc::new(Mutex::new(HashMap::new())),
             semaphore: Arc::new(Semaphore::new(max_concurrent.max(1))),
         }
     }
@@ -80,6 +90,7 @@ impl DesktopDownloader {
                     let path = ch_entry.path();
                     if path.extension().and_then(|e| e.to_str()) == Some("cbz") {
                         let mut manga_id = manga_title.clone();
+                        let mut real_manga_title = manga_title.clone();
                         let mut chapter_id = path.to_string_lossy().to_string();
                         let mut ch_title = path
                             .file_stem()
@@ -92,6 +103,9 @@ impl DesktopDownloader {
                             if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&manifest_bytes) {
                                 if let Some(mid) = val.get("mangaId").and_then(|v| v.as_str()) {
                                     manga_id = mid.to_string();
+                                }
+                                if let Some(mt) = val.get("mangaTitle").and_then(|v| v.as_str()) {
+                                    real_manga_title = mt.to_string();
                                 }
                                 if let Some(cid) = val.get("chapterId").and_then(|v| v.as_str()) {
                                     chapter_id = cid.to_string();
@@ -121,7 +135,7 @@ impl DesktopDownloader {
                         results.push(DownloadedChapter {
                             manga_id,
                             source_id,
-                            manga_title: manga_title.clone(),
+                            manga_title: real_manga_title,
                             manga_cover_url: cover_url,
                             chapter_id,
                             chapter_title: ch_title,
@@ -144,6 +158,48 @@ impl DesktopDownloader {
             .into_iter()
             .filter(|d| d.manga_id == manga_id)
             .collect()
+    }
+
+    pub fn find_downloaded_chapter(&self, chapter_id: &str) -> Option<DownloadedChapter> {
+        self.list_downloaded()
+            .into_iter()
+            .find(|d| d.chapter_id == chapter_id)
+    }
+
+    pub fn delete_downloaded(&self, archive_path: &Path) -> anyhow::Result<()> {
+        let root_canon = fs::canonicalize(&self.downloads_dir)?;
+        let target_canon = fs::canonicalize(archive_path)?;
+        if !target_canon.starts_with(&root_canon) || target_canon == root_canon {
+            anyhow::bail!("Refusing to delete path outside downloads directory");
+        }
+        if target_canon.extension().and_then(|e| e.to_str()) != Some("cbz") {
+            anyhow::bail!("Refusing to delete non-CBZ file");
+        }
+        fs::remove_file(&target_canon)?;
+        if let Some(parent) = target_canon.parent() {
+            if parent != root_canon {
+                let _ = fs::remove_dir(parent); // remove if now empty
+            }
+        }
+        Ok(())
+    }
+
+    pub fn cancel_download(&self, chapter_id: &str) -> bool {
+        let handles = self.abort_handles.lock().remove(chapter_id);
+        if let Some(list) = handles {
+            for h in list {
+                h.abort();
+            }
+            self.update_status(
+                chapter_id,
+                DownloadStatus::Failed {
+                    error: "Cancelled".to_string(),
+                },
+            );
+            true
+        } else {
+            false
+        }
     }
 
     pub fn local_pages(&self, dl: &DownloadedChapter) -> Vec<MangaPage> {
@@ -176,6 +232,7 @@ impl DesktopDownloader {
         {
             let mut jobs = self.jobs.write();
             jobs.retain(|j| j.chapter.id != chapter.id);
+            Self::prune_finished_jobs(&mut jobs);
             jobs.push(DownloadJobState {
                 manga: manga.clone(),
                 chapter: chapter.clone(),
@@ -197,6 +254,7 @@ impl DesktopDownloader {
 
         let completed_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut join_handles = Vec::with_capacity(total);
+        let mut abort_list = Vec::with_capacity(total);
 
         for (idx, page) in pages.into_iter().enumerate() {
             let dl_self = self.clone();
@@ -205,7 +263,7 @@ impl DesktopDownloader {
             let ch_id = chapter.id.clone();
             let counter = completed_counter.clone();
 
-            join_handles.push(tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
                 let _permit = sem.acquire().await?;
                 let bytes = dl_self.fetch_page_with_retry(&page).await?;
 
@@ -216,7 +274,7 @@ impl DesktopDownloader {
                 let ext = detect_image_ext(&bytes);
                 let entry_name = format!("{:04}.{}", idx + 1, ext);
                 let file_path = temp_dir_clone.join(&entry_name);
-                fs::write(&file_path, &bytes)?;
+                tokio::task::spawn_blocking(move || fs::write(&file_path, &bytes).map(|_| file_path)).await??;
 
                 let done = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                 dl_self.update_status(
@@ -231,17 +289,27 @@ impl DesktopDownloader {
                     idx,
                     ArchiveImage {
                         entry_name,
-                        file_path,
+                        file_path: temp_dir_clone.join(format!("{:04}.{}", idx + 1, ext)),
                     },
                 ))
-            }));
+            });
+            abort_list.push(handle.abort_handle());
+            join_handles.push(handle);
         }
+
+        self.abort_handles.lock().insert(chapter.id.clone(), abort_list);
 
         let mut indexed_images = Vec::with_capacity(total);
         for handle in join_handles {
             match handle.await {
                 Ok(Ok(pair)) => indexed_images.push(pair),
                 Ok(Err(e)) => {
+                    if let Some(rest) = self.abort_handles.lock().remove(&chapter.id) {
+                        for h in rest {
+                            h.abort();
+                        }
+                    }
+                    let _ = fs::remove_dir_all(&temp_dir);
                     self.update_status(
                         &chapter.id,
                         DownloadStatus::Failed {
@@ -251,12 +319,23 @@ impl DesktopDownloader {
                     return Err(e);
                 }
                 Err(join_err) => {
-                    let msg = format!("Download worker panicked: {}", join_err);
+                    if let Some(rest) = self.abort_handles.lock().remove(&chapter.id) {
+                        for h in rest {
+                            h.abort();
+                        }
+                    }
+                    let _ = fs::remove_dir_all(&temp_dir);
+                    let msg = if join_err.is_cancelled() {
+                        "Cancelled".to_string()
+                    } else {
+                        format!("Download worker panicked: {}", join_err)
+                    };
                     self.update_status(&chapter.id, DownloadStatus::Failed { error: msg.clone() });
                     anyhow::bail!(msg);
                 }
             }
         }
+        self.abort_handles.lock().remove(&chapter.id);
         indexed_images.sort_by_key(|(idx, _)| *idx);
         for (_, img) in indexed_images {
             archive_images.push(img);
@@ -280,8 +359,25 @@ impl DesktopDownloader {
         })
         .to_string();
 
-        ChapterArchive::write(&target_cbz, &archive_images, Some(&comic_info), Some(&manifest))?;
-        let _ = fs::remove_dir_all(&temp_dir);
+        let archive_res = tokio::task::spawn_blocking(move || {
+            ChapterArchive::write(&target_cbz, &archive_images, Some(&comic_info), Some(&manifest))?;
+            let _ = fs::remove_dir_all(&temp_dir);
+            Ok::<PathBuf, anyhow::Error>(target_cbz)
+        })
+        .await?;
+
+        let target_cbz = match archive_res {
+            Ok(p) => p,
+            Err(e) => {
+                self.update_status(
+                    &chapter.id,
+                    DownloadStatus::Failed {
+                        error: e.to_string(),
+                    },
+                );
+                return Err(e);
+            }
+        };
 
         self.update_status(
             &chapter.id,
@@ -354,6 +450,27 @@ impl DesktopDownloader {
         if let Some(job) = jobs.iter_mut().find(|j| j.chapter.id == chapter_id) {
             job.status = status;
         }
+    }
+
+    fn prune_finished_jobs(jobs: &mut Vec<DownloadJobState>) {
+        let finished_count = jobs
+            .iter()
+            .filter(|j| matches!(j.status, DownloadStatus::Completed { .. } | DownloadStatus::Failed { .. }))
+            .count();
+        if finished_count <= MAX_FINISHED_JOBS {
+            return;
+        }
+        let mut to_drop = finished_count - MAX_FINISHED_JOBS;
+        jobs.retain(|j| {
+            if to_drop > 0
+                && matches!(j.status, DownloadStatus::Completed { .. } | DownloadStatus::Failed { .. })
+            {
+                to_drop -= 1;
+                false
+            } else {
+                true
+            }
+        });
     }
 }
 

@@ -2,11 +2,10 @@
   import { onMount, onDestroy } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
   import { listen } from '@tauri-apps/api/event';
-  import { appState, goBack, openReader, notify, toChronologicalChapters } from '../stores/app.svelte.js';
+  import { appState, goBack, openReader, notify, toChronologicalChapters, mediaUrl } from '../stores/app.svelte.js';
   import { 
     ArrowLeft, Heart, Play, Download, BookOpen, 
-    Calendar, User, Tag, Check, Sparkles, ShieldAlert, X,
-    CheckCircle, Clock
+    Check, ShieldAlert, X, CheckCircle, Clock
   } from 'lucide-svelte';
 
   let manga = appState.activeManga;
@@ -19,6 +18,21 @@
   let showCookieModal = false;
   let cookieInput = '';
   let unlistenCf = null;
+  let readChapters = new Set();
+  let downloadedIds = new Set();
+  let queuingIds = new Set();
+
+  async function refreshChapterBadges() {
+    if (!manga) return;
+    try {
+      const [readIds, dls] = await Promise.all([
+        invoke('get_read_chapters', { mangaId: manga.id }),
+        invoke('get_downloaded_chapters'),
+      ]);
+      readChapters = new Set(readIds || []);
+      downloadedIds = new Set((dls || []).map(d => d.chapter_id));
+    } catch (_) {}
+  }
 
   async function loadDetails() {
     if (!manga) return;
@@ -39,11 +53,12 @@
         console.warn('Enriched details fetch note:', e);
       }
 
-      // Fetch chapters
+      // Fetch chapters & badges
       chapters = await invoke('get_chapters', {
         sourceId: manga.source_id,
         manga,
       });
+      await refreshChapterBadges();
 
       // Record in history
       invoke('record_history', { manga });
@@ -52,6 +67,21 @@
       notify('Failed to load details: ' + e);
     } finally {
       loading = false;
+    }
+  }
+
+  async function handleDownloadChapter(chapter) {
+    if (!manga || downloadedIds.has(chapter.id) || queuingIds.has(chapter.id)) return;
+    queuingIds.add(chapter.id);
+    queuingIds = new Set(queuingIds);
+    try {
+      await invoke('queue_download', { manga, chapter });
+      notify(`Queued download: ${chapter.title}`);
+      setTimeout(refreshChapterBadges, 2500);
+    } catch (e) {
+      notify('Download error: ' + e);
+      queuingIds.delete(chapter.id);
+      queuingIds = new Set(queuingIds);
     }
   }
 
@@ -186,14 +216,14 @@
     <!-- Hero Backdrop Banner -->
     <div class="hero-section">
       {#if manga.cover_url}
-        <div class="backdrop" style:background-image="url('{manga.cover_url}')" />
+        <div class="backdrop" style:background-image="url('{mediaUrl(manga.cover_url, null, 'cover')}')"></div>
       {/if}
-      <div class="backdrop-overlay" />
+      <div class="backdrop-overlay"></div>
 
       <div class="hero-content">
         <div class="cover-card">
           {#if manga.cover_url}
-            <img src={manga.cover_url} alt={manga.title} />
+            <img src={mediaUrl(manga.cover_url, null, 'cover')} alt={manga.title} />
           {:else}
             <div class="placeholder"><BookOpen size={40} /></div>
           {/if}
@@ -259,7 +289,14 @@
       <div class="chapters-header">
         <h3 class="section-title">Chapters ({displayedChapters.length})</h3>
         <div class="chapter-controls">
-          <button class="sort-toggle" on:click={() => sortAscending = !sortAscending}>
+          <input
+            type="search"
+            class="ch-filter-input"
+            placeholder="Filter chapters..."
+            aria-label="Filter chapters"
+            bind:value={chapterFilter}
+          />
+          <button type="button" class="sort-toggle" on:click={() => sortAscending = !sortAscending}>
             {sortAscending ? 'Oldest First' : 'Newest First'}
           </button>
         </div>
@@ -267,7 +304,7 @@
 
       {#if loading}
         <div class="loading-chapters">
-          <div class="spinner" />
+          <div class="spinner"></div>
           <p>Fetching chapter list...</p>
         </div>
       {:else if displayedChapters.length === 0}
@@ -277,7 +314,7 @@
             <h3 class="empty-cf-title">No chapters available or access restricted</h3>
             <p class="empty-cf-desc">If this source is protected by Cloudflare Turnstile, click below to open Z Browser and pass the check.</p>
           </div>
-          <button class="empty-cf-action" on:click={handleSolveCloudflare}>
+          <button type="button" class="empty-cf-action" on:click={handleSolveCloudflare}>
             <ShieldAlert size={16} />
             Pass Cloudflare (Z Browser)
           </button>
@@ -285,26 +322,51 @@
       {:else}
         <div class="chapters-list">
           {#each displayedChapters as chapter (chapter.id)}
-            <button
+            {@const isRead = readChapters.has(chapter.id)}
+            {@const isDownloaded = downloadedIds.has(chapter.id)}
+            <div
               class="chapter-row"
               class:current={progress?.chapter_id === chapter.id}
-              on:click={() => openReader(manga, chapter, 0, chapters)}
+              class:read={isRead}
             >
-              <div class="chapter-info">
-                <span class="chapter-name">{chapter.title}</span>
-                {#if chapter.upload_date}
-                  <span class="chapter-date">
-                    {new Date(chapter.upload_date).toLocaleDateString()}
-                  </span>
+              <button
+                type="button"
+                class="chapter-open-btn"
+                on:click={() => openReader(manga, chapter, 0, chapters)}
+              >
+                <div class="chapter-info">
+                  <span class="chapter-name">{chapter.title}</span>
+                  {#if chapter.upload_date}
+                    <span class="chapter-date">
+                      {new Date(chapter.upload_date).toLocaleDateString()}
+                    </span>
+                  {/if}
+                </div>
+                <div class="chapter-actions">
+                  {#if progress?.chapter_id === chapter.id}
+                    <span class="reading-badge">Reading</span>
+                  {:else if isRead}
+                    <span class="read-badge">Read</span>
+                  {/if}
+                  <Play size={16} class="play-icon" />
+                </div>
+              </button>
+              <button
+                type="button"
+                class="ch-dl-btn"
+                class:downloaded={isDownloaded}
+                title={isDownloaded ? 'Downloaded for offline reading' : 'Download chapter (.cbz)'}
+                aria-label={isDownloaded ? `Downloaded ${chapter.title}` : `Download ${chapter.title}`}
+                disabled={isDownloaded || queuingIds.has(chapter.id)}
+                on:click={() => handleDownloadChapter(chapter)}
+              >
+                {#if isDownloaded}
+                  <Check size={15} />
+                {:else}
+                  <Download size={15} />
                 {/if}
-              </div>
-              <div class="chapter-actions">
-                {#if progress?.chapter_id === chapter.id}
-                  <span class="reading-badge">Reading</span>
-                {/if}
-                <Play size={16} class="play-icon" />
-              </div>
-            </button>
+              </button>
+            </div>
           {/each}
         </div>
       {/if}
@@ -312,7 +374,14 @@
   </div>
 
   {#if showCookieModal}
-    <div class="modal-backdrop" on:click|self={() => (showCookieModal = false)}>
+    <div
+      class="modal-backdrop"
+      role="dialog"
+      aria-modal="true"
+      tabindex="-1"
+      on:click|self={() => (showCookieModal = false)}
+      on:keydown={(e) => e.key === 'Escape' && (showCookieModal = false)}
+    >
       <div class="modal-card">
         <div class="modal-header">
           <div class="modal-title-group">
@@ -361,7 +430,7 @@
     left: 0;
     right: 0;
     height: 56px;
-    background: rgba(15, 19, 26, 0.75);
+    background: var(--z-surface-overlay);
     backdrop-filter: blur(16px);
     display: flex;
     align-items: center;
@@ -415,7 +484,7 @@
   .backdrop-overlay {
     position: absolute;
     inset: 0;
-    background: linear-gradient(180deg, rgba(15, 19, 26, 0.4) 0%, var(--z-bg) 100%);
+    background: linear-gradient(180deg, transparent 0%, var(--z-bg) 100%);
   }
 
   .hero-content {
@@ -584,27 +653,6 @@
     color: #22c55e;
   }
 
-  .cf-action-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 16px;
-    border-radius: var(--z-radius-md);
-    background: rgba(139, 92, 246, 0.15);
-    border: 1px solid rgba(139, 92, 246, 0.4);
-    color: #c4b5fd;
-    font-size: var(--z-text-xs);
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.2s;
-  }
-
-  .cf-action-btn:hover {
-    background: rgba(139, 92, 246, 0.25);
-    border-color: #8b5cf6;
-    color: #ffffff;
-  }
-
   .empty-cf-banner {
     display: flex;
     align-items: center;
@@ -708,22 +756,86 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: var(--z-space-3) var(--z-space-4);
+    padding: 4px 8px 4px 4px;
     background: var(--z-surface);
     border: 1px solid var(--z-border);
     border-radius: var(--z-radius-md);
     transition: all var(--z-duration-fast) var(--z-ease-out);
   }
 
+  .chapter-row.read {
+    opacity: 0.72;
+  }
+
   .chapter-row:hover {
     background: var(--z-surface-raised);
     border-color: var(--z-border-hover);
-    transform: translateX(4px);
+    opacity: 1;
   }
 
   .chapter-row.current {
     border-color: var(--z-accent);
     background: var(--z-accent-muted);
+    opacity: 1;
+  }
+
+  .chapter-open-btn {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--z-space-2) var(--z-space-3);
+    text-align: left;
+  }
+
+  .ch-filter-input {
+    background: var(--z-surface);
+    border: 1px solid var(--z-border);
+    border-radius: var(--z-radius-full);
+    padding: 5px 12px;
+    font-size: var(--z-text-xs);
+    color: var(--z-text);
+    width: 160px;
+  }
+
+  .ch-filter-input:focus {
+    border-color: var(--z-accent);
+  }
+
+  .chapter-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .ch-dl-btn {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    color: var(--z-text-muted);
+    background: var(--z-surface-raised);
+    flex-shrink: 0;
+    transition: all 0.15s ease;
+  }
+
+  .ch-dl-btn:hover:not(:disabled) {
+    color: var(--z-accent);
+    background: var(--z-accent-muted);
+  }
+
+  .ch-dl-btn.downloaded {
+    color: #10b981;
+    background: rgba(16, 185, 129, 0.14);
+  }
+
+  .read-badge {
+    font-size: var(--z-text-xs);
+    background: var(--z-surface-raised);
+    color: var(--z-text-muted);
+    padding: 2px 8px;
+    border-radius: var(--z-radius-full);
+    font-weight: 500;
   }
 
   .chapter-info {

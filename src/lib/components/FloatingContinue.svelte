@@ -1,7 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { openReader, openManga } from '../stores/app.svelte.js';
+  import { openReader, openManga, mediaUrl } from '../stores/app.svelte.js';
   import { Play, BookOpen } from 'lucide-svelte';
 
   let recentManga = null;
@@ -45,10 +45,10 @@
 </script>
 
 {#if recentManga}
-  <div class="floating-continue-card" on:click={handleContinue}>
+  <button type="button" class="floating-continue-card" on:click={handleContinue}>
     <div class="thumb-wrap">
       {#if recentManga.cover_url}
-        <img src={recentManga.cover_url} alt="" class="thumb-img" />
+        <img src={mediaUrl(recentManga.cover_url, null, 'cover')} alt={recentManga.title} class="thumb-img" />
       {:else}
         <div class="thumb-fallback">
           <BookOpen size={16} />
@@ -67,10 +67,10 @@
       {/if}
     </div>
 
-    <button class="play-action-btn" title="Resume reading">
+    <span class="play-action-btn" aria-hidden="true">
       <Play size={16} fill="currentColor" />
-    </button>
-  </div>
+    </span>
+  </button>
 {/if}
 
 <style>
@@ -81,13 +81,16 @@
     display: flex;
     align-items: center;
     gap: 12px;
-    background: rgba(28, 26, 38, 0.96);
-    border: 1px solid rgba(59, 130, 246, 0.4);
+    background: var(--z-surface-overlay);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    border: 1px solid var(--z-border-hover);
     border-radius: 14px;
     padding: 8px 12px;
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6), 0 0 20px rgba(59, 130, 246, 0.15);
+    box-shadow: var(--z-shadow-card), 0 0 20px var(--z-accent-muted);
     cursor: pointer;
     z-index: 999;
+    text-align: left;
     transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
     max-width: 320px;
   }
@@ -156,7 +159,7 @@
   .manga-title {
     font-size: 13px;
     font-weight: 600;
-    color: #f4f4f5;
+    color: var(--z-text);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -165,7 +168,7 @@
 
   .chapter-sub {
     font-size: 11px;
-    color: #a1a1aa;
+    color: var(--z-text-muted);
     line-height: 1.2;
   }
 
@@ -173,7 +176,7 @@
     width: 34px;
     height: 34px;
     border-radius: 50%;
-    background: #2563eb;
+    background: var(--z-accent);
     color: #ffffff;
     border: none;
     display: flex;

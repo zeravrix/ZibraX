@@ -14,6 +14,14 @@ static LINK_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse("a[href*='/manga/
 static TITLE_SEL: Lazy<Selector> =
     Lazy::new(|| Selector::parse(".post-title, .entry-title, .item-title, .data h3, .tt, h3, h4, h5").unwrap());
 static IMG_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse("img").unwrap());
+static LIST_CARD_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse("div.row.c-tabs-item__content, div.page-item-detail, .manga__item, .manga-item, .item-summary, .bsx, .listupd .bs, .box, .page-listing-item, .item-thumb, .col-6, .col-md-2, .col-sm-3, .col-xs-4, article").unwrap());
+static LIST_DIRECT_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse("a[href*='/serie/'], a[href*='/series/'], a[href*='/manga/'], a[href*='/webtoon/'], a[href*='/comics/'], a[href*='/manhwa/']").unwrap());
+static CH_LIST_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse("li.wp-manga-chapter a, .chapter-item a, .listing-chapters_wrap a, #chapter-list a[href], .version-chap li a").unwrap());
+static DETAIL_TITLE_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse(".post-title h1, .summary_content h1, h1.entry-title, h1").unwrap());
+static DETAIL_IMG_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse(".summary_image img, .profile-manga img, .item-thumb img, .post-thumb img, .featured-image img").unwrap());
+static DETAIL_DESC_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse(".description-summary, .summary__content, .summary_content, .description").unwrap());
+static DETAIL_GENRE_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse(".genres-content a, .genres a, .mgen a").unwrap());
+static HOLDER_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse("div[id^='manga-chapters-holder']").unwrap());
 
 pub struct MadaraEngine {
     id: String,
@@ -111,12 +119,8 @@ impl MadaraEngine {
 
     /// Cards from a listing page or an admin-ajax fragment.
     fn parse_listing(&self, html: &str, page_url: &str) -> Vec<Manga> {
-        let card_sel = Selector::parse(
-            "div.row.c-tabs-item__content, div.page-item-detail, .manga__item, .manga-item, .item-summary, .bsx, .listupd .bs, .box, .page-listing-item, .item-thumb, .col-6, .col-md-2, .col-sm-3, .col-xs-4, article",
-        ).unwrap();
-        let direct_sel = Selector::parse(
-            "a[href*='/serie/'], a[href*='/series/'], a[href*='/manga/'], a[href*='/webtoon/'], a[href*='/comics/'], a[href*='/manhwa/']",
-        ).unwrap();
+        let card_sel = &*LIST_CARD_SEL;
+        let direct_sel = &*LIST_DIRECT_SEL;
         let doc = Html::parse_document(html);
         let mut seen = HashSet::new();
         let mut found: Vec<Manga> = doc
@@ -274,7 +278,7 @@ impl MadaraEngine {
 
     fn parse_chapters_from_html(&self, html: &str, manga_id: &str) -> Vec<Chapter> {
         let doc = Html::parse_document(html);
-        let ch_sel = Selector::parse("li.wp-manga-chapter a, .chapter-item a, .listing-chapters_wrap a, #chapter-list a[href], .version-chap li a").unwrap();
+        let ch_sel = &*CH_LIST_SEL;
         let mut list = Vec::new();
         let mut seen = HashSet::new();
 
@@ -320,10 +324,10 @@ impl Source for MadaraEngine {
     async fn details(&self, manga: &Manga) -> anyhow::Result<Manga> {
         let html = self.fetch_html(&manga.id).await?;
         let doc = Html::parse_document(&html);
-        let title_sel = Selector::parse(".post-title h1, .summary_content h1, h1.entry-title, h1").unwrap();
-        let img_sel = Selector::parse(".summary_image img, .profile-manga img, .item-thumb img, .post-thumb img, .featured-image img").unwrap();
-        let desc_sel = Selector::parse(".description-summary, .summary__content, .summary_content, .description").unwrap();
-        let genre_sel = Selector::parse(".genres-content a, .genres a, .mgen a").unwrap();
+        let title_sel = &*DETAIL_TITLE_SEL;
+        let img_sel = &*DETAIL_IMG_SEL;
+        let desc_sel = &*DETAIL_DESC_SEL;
+        let genre_sel = &*DETAIL_GENRE_SEL;
 
         let title = doc
             .select(&title_sel)
@@ -387,8 +391,7 @@ impl Source for MadaraEngine {
         if chapters.is_empty() {
             let holder_id = {
                 let doc = Html::parse_document(&html);
-                let holder_sel = Selector::parse("div[id^='manga-chapters-holder']").unwrap();
-                doc.select(&holder_sel)
+                doc.select(&HOLDER_SEL)
                     .next()
                     .and_then(|el| el.value().attr("data-id"))
                     .map(String::from)

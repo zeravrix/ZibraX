@@ -2,7 +2,16 @@
   import { 
     Globe, MessageSquare, Code2, ShieldCheck, Cpu, ArrowUpRight, Heart, ArrowLeft
   } from 'lucide-svelte';
-  import { goBack } from '../stores/app.svelte.js';
+  import { invoke } from '@tauri-apps/api/core';
+  import { goBack, notify } from '../stores/app.svelte.js';
+
+  async function openExternal(url) {
+    try {
+      await invoke('open_external_url', { url });
+    } catch (e) {
+      notify('Could not open browser: ' + e);
+    }
+  }
 
   const links = [
     {
@@ -66,11 +75,10 @@
     <!-- LINK CARDS -->
     <div class="link-grid">
       {#each links as item}
-        <a 
-          href={item.url} 
-          target="_blank" 
-          rel="noopener noreferrer" 
+        <button
+          type="button"
           class="link-card"
+          on:click={() => openExternal(item.url)}
         >
           <div class="card-icon-box">
             <svelte:component this={item.icon} size={22} />
@@ -84,7 +92,7 @@
             <span class="card-url">{item.url}</span>
           </div>
           <ArrowUpRight size={18} class="arrow-icon" />
-        </a>
+        </button>
       {/each}
     </div>
 
@@ -93,7 +101,7 @@
       <div class="spec-item">
         <Cpu size={16} class="spec-icon" />
         <span class="spec-label">Backend Engine</span>
-        <span class="spec-val">Rust 1.84 • Tokio Async • WebKitGTK 4.1</span>
+        <span class="spec-val">Rust Engine • Tokio Async • WebKitGTK 4.1</span>
       </div>
       <div class="spec-item">
         <ShieldCheck size={16} class="spec-icon" />
@@ -244,6 +252,8 @@
     display: flex;
     align-items: center;
     gap: var(--z-space-4);
+    width: 100%;
+    text-align: left;
     background: var(--z-surface);
     border: 1px solid var(--z-border);
     border-radius: var(--z-radius-lg);

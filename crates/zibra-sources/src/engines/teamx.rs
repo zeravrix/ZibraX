@@ -1,9 +1,18 @@
 use crate::extractor::{extract_best_image_url, extract_chapter_pages, parse_chapter_number, resolve_url};
 use crate::{MangaPageResult, Source};
 use async_trait::async_trait;
+use once_cell::sync::Lazy;
 use scraper::{Html, Selector};
 use std::collections::{HashMap, HashSet};
 use zibra_core::{Chapter, Manga, MangaPage, SourceTag};
+
+static A_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse("a[href]").unwrap());
+static IMG_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse("img").unwrap());
+static TITLE_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse(".tt, h3, h4, .post-title").unwrap());
+static DETAIL_TITLE_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse("div.author-info-title h1, h1").unwrap());
+static DETAIL_DESC_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse("div.review-content").unwrap());
+static DETAIL_IMG_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse("div.text-right img, .poster img, .series-thumb img").unwrap());
+static CH_SEL: Lazy<Selector> = Lazy::new(|| Selector::parse("div.chapter-card, .eplister ul li").unwrap());
 
 pub struct TeamXSource {
     client: reqwest::Client,
@@ -31,9 +40,9 @@ impl TeamXSource {
     fn parse_cards(&self, html: &str, selector: &str, page_url: &str) -> Vec<Manga> {
         let doc = Html::parse_document(html);
         let Ok(sel) = Selector::parse(selector) else { return Vec::new() };
-        let a_sel = Selector::parse("a[href]").unwrap();
-        let img_sel = Selector::parse("img").unwrap();
-        let title_sel = Selector::parse(".tt, h3, h4, .post-title").unwrap();
+        let a_sel = &*A_SEL;
+        let img_sel = &*IMG_SEL;
+        let title_sel = &*TITLE_SEL;
 
         let mut list = Vec::new();
         let mut seen = HashSet::new();
@@ -118,9 +127,9 @@ impl Source for TeamXSource {
     async fn details(&self, manga: &Manga) -> anyhow::Result<Manga> {
         let html = self.fetch_html(&manga.id).await?;
         let doc = Html::parse_document(&html);
-        let title_sel = Selector::parse("div.author-info-title h1, h1").unwrap();
-        let desc_sel = Selector::parse("div.review-content").unwrap();
-        let img_sel = Selector::parse("div.text-right img, .poster img, .series-thumb img").unwrap();
+        let title_sel = &*DETAIL_TITLE_SEL;
+        let desc_sel = &*DETAIL_DESC_SEL;
+        let img_sel = &*DETAIL_IMG_SEL;
 
         let mut updated = manga.clone();
         if let Some(t) = doc.select(&title_sel).next() {
@@ -145,8 +154,8 @@ impl Source for TeamXSource {
     async fn chapters(&self, manga: &Manga) -> anyhow::Result<Vec<Chapter>> {
         let html = self.fetch_html(&manga.id).await?;
         let doc = Html::parse_document(&html);
-        let ch_sel = Selector::parse("div.chapter-card, .eplister ul li").unwrap();
-        let a_sel = Selector::parse("a[href]").unwrap();
+        let ch_sel = &*CH_SEL;
+        let a_sel = &*A_SEL;
 
         let mut list = Vec::new();
         let mut seen = HashSet::new();

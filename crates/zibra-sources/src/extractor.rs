@@ -331,6 +331,10 @@ pub async fn fetch_html_resilient(
 }
 
 async fn fetch_via_curl(url: &str, referer: Option<&str>) -> anyhow::Result<String> {
+    let trimmed = url.trim();
+    if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+        anyhow::bail!("curl fallback only supports http/https URLs");
+    }
     let mut cmd = tokio::process::Command::new("curl");
     cmd.arg("-s")
         .arg("-L")
@@ -358,9 +362,10 @@ async fn fetch_via_curl(url: &str, referer: Option<&str>) -> anyhow::Result<Stri
         .arg("-H")
         .arg("Sec-Fetch-User: ?1");
     if let Some(r) = referer {
-        cmd.arg("-H").arg(format!("Referer: {}", r));
+        let clean_ref = r.replace(['\r', '\n'], "");
+        cmd.arg("-H").arg(format!("Referer: {}", clean_ref));
     }
-    cmd.arg(url);
+    cmd.arg("--").arg(trimmed);
     let output = cmd.output().await?;
     if output.status.success() {
         let text = String::from_utf8_lossy(&output.stdout).to_string();

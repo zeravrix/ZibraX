@@ -61,6 +61,7 @@ impl LibraryStore {
                  manga_id TEXT PRIMARY KEY,
                  chapter_id TEXT NOT NULL,
                  page_index INTEGER NOT NULL DEFAULT 0,
+                 total_pages INTEGER,
                  scroll_offset_y REAL NOT NULL DEFAULT 0.0,
                  chapter_number REAL,
                  updated_at INTEGER NOT NULL
@@ -70,6 +71,7 @@ impl LibraryStore {
                  manga_id TEXT NOT NULL,
                  chapter_id TEXT NOT NULL,
                  page_index INTEGER NOT NULL DEFAULT 0,
+                 total_pages INTEGER,
                  scroll_offset_y REAL NOT NULL DEFAULT 0.0,
                  chapter_number REAL,
                  updated_at INTEGER NOT NULL,
@@ -95,6 +97,10 @@ impl LibraryStore {
              CREATE INDEX IF NOT EXISTS idx_reading_progress_manga ON reading_progress(manga_id);
              CREATE INDEX IF NOT EXISTS idx_chapter_progress_manga ON chapter_progress(manga_id);",
         )?;
+
+        // Idempotent migration for existing databases created before total_pages existed
+        let _ = conn.execute("ALTER TABLE reading_progress ADD COLUMN total_pages INTEGER", []);
+        let _ = conn.execute("ALTER TABLE chapter_progress ADD COLUMN total_pages INTEGER", []);
 
         let store = Self {
             root: root.to_path_buf(),
@@ -297,7 +303,10 @@ impl LibraryStore {
                  END,
                  description = CASE WHEN excluded.description != '' THEN excluded.description ELSE history_manga.description END,
                  author = COALESCE(excluded.author, history_manga.author),
+                 genres_json = CASE WHEN excluded.genres_json != '[]' THEN excluded.genres_json ELSE history_manga.genres_json END,
                  status = COALESCE(excluded.status, history_manga.status),
+                 url = COALESCE(excluded.url, history_manga.url),
+                 is_manhwa = excluded.is_manhwa,
                  last_accessed = excluded.last_accessed",
             params![
                 manga.id,
@@ -324,12 +333,14 @@ impl LibraryStore {
 
     pub fn save_progress(&self, progress: &ReadingProgress) {
         let conn = self.conn.lock();
+        let total_pages = progress.total_pages.map(|n| n as i64);
         let _ = conn.execute(
-            "INSERT INTO reading_progress (manga_id, chapter_id, page_index, scroll_offset_y, chapter_number, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO reading_progress (manga_id, chapter_id, page_index, total_pages, scroll_offset_y, chapter_number, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(manga_id) DO UPDATE SET
                  chapter_id = excluded.chapter_id,
                  page_index = excluded.page_index,
+                 total_pages = COALESCE(excluded.total_pages, reading_progress.total_pages),
                  scroll_offset_y = excluded.scroll_offset_y,
                  chapter_number = excluded.chapter_number,
                  updated_at = excluded.updated_at",
@@ -337,16 +348,18 @@ impl LibraryStore {
                 progress.manga_id,
                 progress.chapter_id,
                 progress.page_index as i64,
+                total_pages,
                 progress.scroll_offset_y,
                 progress.chapter_number,
                 progress.updated_at,
             ],
         );
         let _ = conn.execute(
-            "INSERT INTO chapter_progress (manga_id, chapter_id, page_index, scroll_offset_y, chapter_number, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "INSERT INTO chapter_progress (manga_id, chapter_id, page_index, total_pages, scroll_offset_y, chapter_number, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
              ON CONFLICT(manga_id, chapter_id) DO UPDATE SET
                  page_index = excluded.page_index,
+                 total_pages = COALESCE(excluded.total_pages, chapter_progress.total_pages),
                  scroll_offset_y = excluded.scroll_offset_y,
                  chapter_number = excluded.chapter_number,
                  updated_at = excluded.updated_at",
@@ -354,6 +367,7 @@ impl LibraryStore {
                 progress.manga_id,
                 progress.chapter_id,
                 progress.page_index as i64,
+                total_pages,
                 progress.scroll_offset_y,
                 progress.chapter_number,
                 progress.updated_at,
@@ -364,7 +378,7 @@ impl LibraryStore {
     pub fn latest_progress(&self, manga_id: &str) -> Option<ReadingProgress> {
         let conn = self.conn.lock();
         conn.query_row(
-            "SELECT manga_id, chapter_id, page_index, scroll_offset_y, chapter_number, updated_at
+            "SELECT manga_id, chapter_id, page_index, total_pages, scroll_offset_y, chapter_number, updated_at
              FROM reading_progress WHERE manga_id = ?1",
             params![manga_id],
             |row| {
@@ -372,9 +386,10 @@ impl LibraryStore {
                     manga_id: row.get(0)?,
                     chapter_id: row.get(1)?,
                     page_index: row.get::<_, i64>(2)?.max(0) as usize,
-                    scroll_offset_y: row.get(3)?,
-                    chapter_number: row.get(4)?,
-                    updated_at: row.get(5)?,
+                    total_pages: row.get::<_, Option<i64>>(3)?.filter(|&v| v > 0).map(|v| v as usize),
+                    scroll_offset_y: row.get(4)?,
+                    chapter_number: row.get(5)?,
+                    updated_at: row.get(6)?,
                 })
             },
         )
@@ -385,7 +400,7 @@ impl LibraryStore {
     pub fn chapter_progress(&self, manga_id: &str, chapter_id: &str) -> Option<ReadingProgress> {
         let conn = self.conn.lock();
         conn.query_row(
-            "SELECT manga_id, chapter_id, page_index, scroll_offset_y, chapter_number, updated_at
+            "SELECT manga_id, chapter_id, page_index, total_pages, scroll_offset_y, chapter_number, updated_at
              FROM chapter_progress WHERE manga_id = ?1 AND chapter_id = ?2",
             params![manga_id, chapter_id],
             |row| {
@@ -393,9 +408,10 @@ impl LibraryStore {
                     manga_id: row.get(0)?,
                     chapter_id: row.get(1)?,
                     page_index: row.get::<_, i64>(2)?.max(0) as usize,
-                    scroll_offset_y: row.get(3)?,
-                    chapter_number: row.get(4)?,
-                    updated_at: row.get(5)?,
+                    total_pages: row.get::<_, Option<i64>>(3)?.filter(|&v| v > 0).map(|v| v as usize),
+                    scroll_offset_y: row.get(4)?,
+                    chapter_number: row.get(5)?,
+                    updated_at: row.get(6)?,
                 })
             },
         )
@@ -415,13 +431,32 @@ impl LibraryStore {
     }
 
     pub fn latest_global_read(&self) -> Option<(Manga, ReadingProgress)> {
-        let history = self.list_history();
-        for m in history {
-            if let Some(p) = self.latest_progress(&m.id) {
-                return Some((m, p));
-            }
-        }
-        None
+        let conn = self.conn.lock();
+        conn.query_row(
+            "SELECT h.id, h.title, h.cover_url, h.description, h.source_id, h.author, h.artist,
+                    h.genres_json, h.status, h.cached_chapter_count, h.url, h.is_manhwa,
+                    r.manga_id, r.chapter_id, r.page_index, r.total_pages, r.scroll_offset_y, r.chapter_number, r.updated_at
+             FROM history_manga h
+             INNER JOIN reading_progress r ON h.id = r.manga_id
+             ORDER BY h.last_accessed DESC
+             LIMIT 1",
+            [],
+            |row| {
+                let manga = Self::row_to_manga(row)?;
+                let progress = ReadingProgress {
+                    manga_id: row.get(12)?,
+                    chapter_id: row.get(13)?,
+                    page_index: row.get::<_, i64>(14)?.max(0) as usize,
+                    total_pages: row.get::<_, Option<i64>>(15)?.filter(|&v| v > 0).map(|v| v as usize),
+                    scroll_offset_y: row.get(16)?,
+                    chapter_number: row.get(17)?,
+                    updated_at: row.get(18)?,
+                };
+                Ok((manga, progress))
+            },
+        )
+        .optional()
+        .unwrap_or(None)
     }
 
     pub fn cache_chapters(&self, manga_id: &str, chapters: &[Chapter]) {
@@ -610,6 +645,7 @@ impl LibraryStore {
             manga_id,
             chapter_id,
             page_index,
+            total_pages: None,
             scroll_offset_y: 0.0,
             chapter_number,
             updated_at,
